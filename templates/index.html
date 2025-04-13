@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manga Cleaner & Translator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.2/socket.io.js"></script>
+</head>
+<body>
+    <h1>Manga Bubble Processor</h1>
+
+    <div id="upload-section">
+        <label for="imageUpload">Choose Manga Page:</label>
+        <input type="file" id="imageUpload" accept="image/png, image/jpeg, image/webp">
+
+        <div>
+            <input type="checkbox" id="translateCheckbox">
+            <label for="translateCheckbox">Translate to Arabic?</label>
+        </div>
+
+        <button id="processButton" disabled>Upload and Process</button>
+    </div>
+
+    <div id="progress-section" style="display: none;">
+        <h2>Processing...</h2>
+        <progress id="progressBar" value="0" max="100"></progress>
+        <p id="progressText">Starting...</p>
+        <p id="errorText" style="color: red; display: none;"></p>
+    </div>
+
+    <div id="result-section" style="display: none;">
+        <h2>Result</h2>
+        <img id="resultImage" src="#" alt="Processed Image" style="max-width: 80%; height: auto;">
+        <br>
+        <a id="downloadLink" href="#" download="processed_image.jpg">
+            <button>Download Result</button>
+        </a>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
