@@ -9,4 +9,5 @@ python-bidi
 shapely
 eventlet
 python-dotenv
+gunicorn
 # أضف أي مكتبات أخرى يستخدمها text_formatter.py إذا لم تكن مدرجة
