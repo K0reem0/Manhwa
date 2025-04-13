@@ -1,10 +1,12 @@
 Flask
-Flask-CORS
+Flask-SocketIO
 requests
 numpy
-opencv-python-headless  # أو opencv-python إذا كنت تحتاج للواجهة الرسومية أيضاً
+opencv-python  # أو opencv-python إذا كنت تحتاج للواجهة الرسومية أيضاً
 Pillow
 arabic_reshaper
 python-bidi
 shapely
+eventlet
+python-dotenv
 # أضف أي مكتبات أخرى يستخدمها text_formatter.py إذا لم تكن مدرجة
