@@ -594,27 +594,110 @@ def handle_start_processing(data):
     mode = data['mode']; print(f"   Mode: '{mode}'")
     upload_dir = app.config['UPLOAD_FOLDER']
     if not os.path.exists(upload_dir) or not os.access(upload_dir, os.W_OK): emit_error("Server upload dir error.", sid); return
-    upload_path = None
+    upload_path = None # Initialize path variable
     try:
-        file_data_str = data['file']; header, encoded = file_data_str.split(',', 1)
-        file_extension = header.split('/')[1].split(';')[0].split('+')[0]
-        if file_extension not in ALLOWED_EXTENSIONS: emit_error(f'Invalid file type: {file_extension}.', sid); return
-        file_bytes = base64.b64decode(encoded)
-        unique_id = uuid.uuid4(); input_filename = f"{unique_id}.{file_extension}"; output_filename_base = f"{unique_id}"
-        upload_path = os.path.join(upload_dir, input_filename)
-        with open(upload_path, 'wb') as f: f.write(file_bytes)
-        print(f"   ✔️ File saved: {upload_path} ({len(file_bytes)/1024:.1f} KB)")
-    except Exception as e: print(f"❌ File handling error: {e}"); traceback.print_exc(); emit_error(f'Server error processing upload: {type(e).__name__}', sid); return
-    # --- Start Task ---
-    if upload_path:
-        print(f"   Attempting to start task...")
+        print(f"   Decoding Base64 data...") # Added log
+        file_data_str = data['file']
+        # Split header and decode
         try:
-            socketio.start_background_task(process_image_task, upload_path, output_filename_base, mode, sid)
-            print(f"   ✔️ Background task initiated."); socketio.emit('processing_started', {'message': 'Upload successful! Processing...'}, room=sid)
-        except Exception as task_err: print(f"❌ Failed start task: {task_err}"); traceback.print_exc(); emit_error(f"Server error starting task: {task_err}", sid); # Try cleanup
-            if os.path.exists(upload_path): try: os.remove(upload_path); print(f"   🧹 Cleaned up file due to task start failure.") except Exception: pass
-    else: emit_error("Internal server error (upload path missing).", sid)
-    print(f"--- Finished handling 'start_processing' for SID: {sid} ---")
+            header, encoded = file_data_str.split(',', 1)
+            file_extension = header.split('/')[1].split(';')[0].split('+')[0] # Handle image/svg+xml etc.
+        except ValueError:
+            # Handle cases where the base64 string format might be unexpected
+            print(f"   ❗ ERROR: Invalid base64 header format from {sid}.")
+            emit_error('Invalid image data header.', sid)
+            return # Stop processing
+
+        # Validate extension
+        if file_extension not in ALLOWED_EXTENSIONS:
+             print(f"   ❗ ERROR: Invalid file extension '{file_extension}' from {sid}.")
+             emit_error(f'Invalid file type: {file_extension}. Allowed: {", ".join(ALLOWED_EXTENSIONS)}', sid)
+             return # Stop processing
+
+        print(f"   File extension: '{file_extension}'")
+        file_bytes = base64.b64decode(encoded) # Can raise binascii.Error
+        print(f"   Base64 decoded successfully. Size: {len(file_bytes) / 1024:.1f} KB")
+
+        # Generate paths
+        unique_id = uuid.uuid4()
+        input_filename = f"{unique_id}.{file_extension}"
+        output_filename_base = f"{unique_id}" # Base name for results
+        upload_path = os.path.join(upload_dir, input_filename) # Use checked upload_dir
+
+        # Save the file
+        print(f"   Attempting to write file to: {upload_path}")
+        with open(upload_path, 'wb') as f:
+            f.write(file_bytes)
+        print(f"   ✔️ File successfully saved.")
+
+    except (base64.binascii.Error, ValueError) as decode_err:
+        # Handle errors during decoding or header splitting
+        print(f"   ❗ ERROR: Base64 decoding/format failed for {sid}: {decode_err}")
+        emit_error(f"Failed to decode image data: {decode_err}", sid)
+        return # Stop processing
+    except OSError as write_err:
+         # Handle errors during file writing
+         print(f"   ❗ ERROR: Failed to write file '{upload_path}' for {sid}: {write_err}")
+         traceback.print_exc() # Log full traceback for server admin
+         emit_error(f"Server error saving file: {write_err}", sid)
+         # Ensure upload_path is None if write failed, preventing task start attempt
+         upload_path = None # Explicitly set to None on write error
+         return # Stop processing
+    except Exception as e:
+        # Catch any other unexpected errors during file handling
+        print(f"   ❗ UNEXPECTED ERROR during file handling for {sid}: {e}")
+        traceback.print_exc()
+        emit_error(f'Unexpected server error during file upload: {type(e).__name__}', sid)
+        upload_path = None # Explicitly set to None on error
+        return # Stop processing
+
+    # --- Start Task ---
+    # Only attempt to start if upload_path was successfully set (file saved)
+    if upload_path:
+        print(f"   Attempting to start background task (Mode: '{mode}') for: {upload_path}")
+        try:
+            # Initiate the background processing task
+            socketio.start_background_task(
+                process_image_task,
+                upload_path,
+                output_filename_base,
+                mode,
+                sid
+            )
+            # Confirm task initiation to logs and client
+            print(f"   ✔️ Background task initiated for SID: {sid}")
+            socketio.emit('processing_started', {'message': 'Upload successful! Processing started...'}, room=sid)
+
+        except Exception as task_err:
+            # Handle errors specifically related to *starting* the task
+            print(f"   ❗ CRITICAL ERROR: Failed to start background task for {sid}: {task_err}")
+            traceback.print_exc()
+            emit_error(f"Server error starting task: {task_err}", sid)
+
+            # --- FIXED FILE CLEANUP on task start failure ---
+            # This block replaces the problematic one-liner
+            # Ensure it has the same indentation as the print/traceback/emit lines above
+            print(f"   Attempting cleanup for failed task start: {upload_path}")
+            # Check path exists before trying to remove
+            if os.path.exists(upload_path):
+                try:
+                    os.remove(upload_path)
+                    print(f"   🧹 Cleaned up file due to task start failure: {upload_path}")
+                except Exception as cleanup_err:
+                    # Log cleanup errors but don't crash the handler
+                    print(f"   ⚠️ Could not clean up file after task start failure: {upload_path} - {cleanup_err}")
+            # --- END OF FIXED FILE CLEANUP ---
+
+    else:
+        # This handles the case where upload_path remained None (due to an earlier error)
+        print(f"   ❗ ERROR: Cannot start task because upload_path is not set (file save likely failed). SID: {sid}")
+        # Emit error only if no previous error was emitted for the file handling part
+        # (Avoids duplicate error messages to the client)
+        # emit_error("Internal server error (cannot start task).", sid) # Maybe too generic
+
+    # This print marks the end of the 'handle_start_processing' function execution path
+    print(f"--- Finished handling 'start_processing' event for SID: {sid} ---")
+
 
 # --- Main Execution ---
 if __name__ == '__main__':
