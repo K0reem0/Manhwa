@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+:# -*- coding: utf-8 -*-
 import os
 import sys
 import cv2
@@ -469,12 +469,21 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                       minx_c=max(0,minx-5); miny_c=max(0,miny-5); maxx_c=min(w_img,maxx+5); maxy_c=min(h_img,maxy+5)
                       if maxx_c<=minx_c or maxy_c<=miny_c: continue
                       bubble_crop = original_image_for_cropping[miny_c:maxy_c, minx_c:maxx_c]
-                      if bubble_crop.size == 0: continue
-                      _, crop_buffer_enc = cv2.imencode('.jpg', bubble_crop)
-                      if crop_buffer_enc is None: continue; crop_bytes = crop_buffer_enc.tobytes()
+                    if bubble_crop.size == 0:
+                        print(f"   ⚠️ Bubble crop {i+1} is empty. Skipping.")
+                        continue # Skips to next bubble
 
-                      # ... (Get translation as before) ...
-                      translation = ask_luminai(TRANSLATION_PROMPT, crop_bytes, sid=sid)
+                    # --- CORRECTED Encoding Check ---
+                    print(f"   Encoding bubble crop {i+1}...")
+                    retval, crop_buffer_enc = cv2.imencode('.jpg', bubble_crop) # Get return value
+                    if not retval: # Check the boolean success flag
+                        print(f"   ⚠️ Failed to encode bubble crop {i+1} to JPG (retval=False). Skipping.")
+                        continue # Skips to the next bubble if encoding failed
+                    # --- Encoding succeeded, now assign bytes ---
+                    crop_bytes = crop_buffer_enc.tobytes()
+
+                    # --- Call translation function (Now crop_bytes is guaranteed to be assigned) ---
+                    translation = ask_luminai(TRANSLATION_PROMPT, crop_bytes, sid=sid)
                       if not translation: translation = "[ترجمة فارغة]"
 
                       # --- Mode Specific Actions ---
