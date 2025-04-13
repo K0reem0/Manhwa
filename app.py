@@ -101,27 +101,38 @@ except OSError as e:
     # sys.exit(1)
 
 # --- Font Setup ---
-# (Keep the setup_font function as previously defined)
 def setup_font():
+    """Finds the font file path and sets it using the text_formatter object."""
     font_path_to_set = None
     try:
+        # --- Find Font Path ---
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Look inside a 'fonts' subdirectory relative to the script
         potential_path = os.path.join(script_dir, "fonts", "66Hayah.otf") # Adjust font name if different
         if os.path.exists(potential_path):
             font_path_to_set = potential_path
+        # Fallback: Look in 'fonts' subdirectory relative to current working directory
         elif os.path.exists(os.path.join(".", "fonts", "66Hayah.otf")):
              font_path_to_set = os.path.join(".", "fonts", "66Hayah.otf")
 
-        if font_path_to_set and not isinstance(text_formatter, DummyTextFormatter):
-            print(f"ℹ️ WebApp attempting to set Arabic font: {font_path_to_set}")
+        # --- Set Font Path using text_formatter (real or dummy) ---
+        if font_path_to_set:
+            print(f"ℹ️ Font found: '{font_path_to_set}'. Setting path via text_formatter.")
+            # Call the method directly - it works on both real and dummy objects
             text_formatter.set_arabic_font_path(font_path_to_set)
-        elif not isinstance(text_formatter, DummyTextFormatter):
-            print("⚠️ Warning: WebApp could not find 'fonts/66Hayah.otf'. Using default PIL font via formatter.")
-            text_formatter.set_arabic_font_path(None) # Explicitly use default
+        else:
+            print("⚠️ Font 'fonts/66Hayah.otf' not found. Using default font setting via text_formatter.")
+            # Tell the formatter (real or dummy) to use its default/None path
+            text_formatter.set_arabic_font_path(None)
+
     except Exception as e:
-        print(f"ℹ️ Error during font setup: {e}. Check text_formatter module and font path.")
-        if not isinstance(text_formatter, DummyTextFormatter):
-             text_formatter.set_arabic_font_path(None)
+        # Catch errors specifically related to finding the path (e.g., os functions)
+        print(f"❌ Error during font *path finding*: {e}. Using default font setting.")
+        # Ensure we attempt to set the path to None in the formatter on error
+        try:
+            text_formatter.set_arabic_font_path(None)
+        except Exception as E2:
+             print(f"❌ Error setting font path to None after another error: {E2}")
 
 setup_font()
 
