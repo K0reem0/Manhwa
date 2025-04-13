@@ -24,10 +24,8 @@ eventlet.monkey_patch()
 try:
     import text_formatter # Assuming text_formatter.py is in the same directory
     print("✔️ Successfully imported 'text_formatter.py'.")
-    # Basic check for essential functions (adjust if your names differ)
     if not all(hasattr(text_formatter, func) for func in ['set_arabic_font_path', 'get_font', 'format_arabic_text', 'layout_balanced_text']):
          print("⚠️ WARNING: 'text_formatter.py' seems to be missing required functions!")
-         # Note: No ImportError raised here, allows running with partial module if needed
 except ImportError as import_err:
     print(f"❌ ERROR: Cannot import 'text_formatter.py': {import_err}")
     class DummyTextFormatter: # Define dummy only if import fails
@@ -70,10 +68,8 @@ def setup_font():
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         potential_path = os.path.join(script_dir, "fonts", "66Hayah.otf") # Your font file
-        if os.path.exists(potential_path):
-            font_path_to_set = potential_path
-        elif os.path.exists(os.path.join(".", "fonts", "66Hayah.otf")):
-             font_path_to_set = os.path.join(".", "fonts", "66Hayah.otf")
+        if os.path.exists(potential_path): font_path_to_set = potential_path
+        elif os.path.exists(os.path.join(".", "fonts", "66Hayah.otf")): font_path_to_set = os.path.join(".", "fonts", "66Hayah.otf")
 
         if font_path_to_set:
             print(f"ℹ️ Font found: '{font_path_to_set}'. Setting path.")
@@ -144,32 +140,23 @@ def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     Replace/Refine with your specific layout requirements if needed.
     Searches for the best font size and text layout using text_formatter.
     """
-    print("ℹ️ Finding optimal text settings (Placeholder/Original Logic)...") # Indicate potential placeholder
-    if not initial_shrunk_polygon or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid or not text:
-        print("   ⚠️ Invalid input to find_optimal_text_settings_final.")
-        return None
-
+    print("⚠️ WARNING: Using PLACEHOLDER logic for find_optimal_text_settings_final.")
+    if not initial_shrunk_polygon or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid or not text: return None
     best_fit = None
-    for font_size in range(65, 4, -1): # Iterate font sizes
+    for font_size in range(65, 4, -1):
         font = text_formatter.get_font(font_size)
-        if font is None: continue # Skip size if font loading fails
-
+        if font is None: continue
         padding_distance = max(1.5, font_size * 0.12)
-        try: # Shrink polygon for text fitting
+        try:
             text_fitting_polygon = initial_shrunk_polygon.buffer(-padding_distance, join_style=2)
             if not text_fitting_polygon.is_valid or text_fitting_polygon.is_empty: text_fitting_polygon = initial_shrunk_polygon.buffer(-2.0, join_style=2)
             if not isinstance(text_fitting_polygon, Polygon) or not text_fitting_polygon.is_valid or text_fitting_polygon.is_empty: continue
         except Exception as buffer_err: print(f"   ⚠️ Buffer error sz {font_size}: {buffer_err}"); continue
-
         minx, miny, maxx, maxy = text_fitting_polygon.bounds; target_width = maxx - minx; target_height = maxy - miny
-        if target_width <= 5 or target_height <= 10: continue # Target area too small
-
-        # --- Use text_formatter's layout function ---
+        if target_width <= 5 or target_height <= 10: continue
         try: wrapped_text = text_formatter.layout_balanced_text(draw, text, font, target_width)
         except Exception as layout_err: print(f"   ⚠️ Layout error sz {font_size}: {layout_err}"); continue
         if not wrapped_text: continue
-
-        # --- Measure and Check Fit ---
         try:
             m_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, spacing=4, align='center')
             text_actual_width = m_bbox[2] - m_bbox[0]; text_actual_height = m_bbox[3] - m_bbox[1]; shadow_offset = max(1, font_size // 18)
@@ -177,11 +164,10 @@ def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
                 x_offset = (target_width - text_actual_width) / 2; y_offset = (target_height - text_actual_height) / 2
                 draw_x = minx + x_offset - m_bbox[0]; draw_y = miny + y_offset - m_bbox[1]
                 best_fit = {'text': wrapped_text, 'font': font, 'x': int(draw_x), 'y': int(draw_y), 'font_size': font_size}
-                print(f"   ✔️ Optimal fit found: Size={font_size}, Pos=({int(draw_x)},{int(draw_y)})"); break # Exit loop
+                print(f"   ✔️ Placeholder fit: Size={font_size}, Pos=({int(draw_x)},{int(draw_y)})"); break
         except Exception as measure_err: print(f"   ⚠️ Measure error sz {font_size}: {measure_err}"); continue
-
-    if best_fit is None: print(f"   ⚠️ Warning: Could not find suitable font size for text: '{text[:30]}...'")
-    return best_fit # Return found settings or None
+    if best_fit is None: print(f"   ⚠️ Placeholder warning: Could not fit text: '{text[:30]}...'")
+    return best_fit
 
 def draw_text_on_layer(text_settings, image_size):
     """
@@ -189,20 +175,18 @@ def draw_text_on_layer(text_settings, image_size):
     Replace/Refine with your specific drawing requirements if needed.
     Draws text+shadow on a transparent layer using PIL.
     """
-    print("ℹ️ Drawing text layer (Placeholder/Original Logic)...") # Indicate potential placeholder
-    text_layer = Image.new('RGBA', image_size, (0, 0, 0, 0)) # Start with empty layer
+    print("⚠️ WARNING: Using PLACEHOLDER logic for draw_text_on_layer.")
+    text_layer = Image.new('RGBA', image_size, (0, 0, 0, 0))
     if not text_settings or not isinstance(text_settings, dict): return text_layer
     try:
         draw_on_layer = ImageDraw.Draw(text_layer)
         font = text_settings.get('font'); text_to_draw = text_settings.get('text', ''); x = text_settings.get('x', 0); y = text_settings.get('y', 0); font_size = text_settings.get('font_size', 10)
         if not font or not text_to_draw: return text_layer
         shadow_offset = max(1, font_size // 18); shadow_color_with_alpha = SHADOW_COLOR + (SHADOW_OPACITY,)
-        # Draw shadow
         draw_on_layer.multiline_text((x + shadow_offset, y + shadow_offset), text_to_draw, font=font, fill=shadow_color_with_alpha, align='center', spacing=4)
-        # Draw text
         draw_on_layer.multiline_text((x, y), text_to_draw, font=font, fill=TEXT_COLOR + (255,), align='center', spacing=4)
-        print(f"   ✔️ Drew text '{text_to_draw[:20]}...' at ({x},{y})")
-    except Exception as e: print(f"❌ Error in draw_text_on_layer: {e}"); traceback.print_exc(limit=1)
+        print(f"   ✔️ Placeholder draw: '{text_to_draw[:20]}...' at ({x},{y})")
+    except Exception as e: print(f"❌ Error in (placeholder) draw_text_on_layer: {e}"); traceback.print_exc(limit=1)
     return text_layer
 
 
@@ -241,7 +225,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
         if np.any(text_mask) and polygons_drawn > 0:
             emit_progress(1, f"Inpainting {polygons_drawn} areas...", 20, sid)
-            # --- CORRECTED try...except block for inpainting ---
+            # --- CORRECTED try...except block for inpainting (Fixes SyntaxError) ---
             try:
                 print("   Attempting cv2.inpaint...") # Add log
                 inpainted_image = cv2.inpaint(result_image, text_mask, 10, cv2.INPAINT_NS) # Use INPAINT_NS
@@ -251,7 +235,6 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                 print("   ✔️ cv2.inpaint successful.")
                 emit_progress(1, "Inpainting complete.", 25, sid)
             except Exception as inpaint_err:
-                # This except block must be at the SAME indentation level as the 'try' above
                 print(f"❌ Error during inpainting: {inpaint_err}")
                 traceback.print_exc(limit=1)
                 emit_error(f"Inpainting failed: {inpaint_err}", sid)
@@ -304,11 +287,11 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                       bubble_crop = original_image_for_cropping[miny_c:maxy_c, minx_c:maxx_c]
                       if bubble_crop.size == 0: print(f"   Skip bbl {i+1}: Empty crop area"); continue
 
-                      # --- CORRECTED Encoding Check ---
+                      # --- Corrected Encoding Check (Fixes UnboundLocalError) ---
                       print(f"   Encoding bubble crop {i+1}...")
-                      retval, crop_buffer_enc = cv2.imencode('.jpg', bubble_crop) # Get retval
+                      retval, crop_buffer_enc = cv2.imencode('.jpg', bubble_crop)
                       if not retval: print(f"   ⚠️ Failed encode crop {i+1}. Skip."); continue
-                      crop_bytes = crop_buffer_enc.tobytes() # Assign ONLY if encode succeeded
+                      crop_bytes = crop_buffer_enc.tobytes()
                       # --- End Corrected Check ---
 
                       translation = ask_luminai(TRANSLATION_PROMPT, crop_bytes, sid=sid)
@@ -323,14 +306,30 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                            arabic_text = text_formatter.format_arabic_text(translation)
                            if not arabic_text: print(f"   Skip bbl {i+1}: Empty formatted text"); continue
 
-                           poly_width=maxx-minx; poly_height=maxy-miny # Shrink polygon
+                           # --- Shrink Polygon Block (Fixes SyntaxError) ---
+                           poly_width=maxx-minx; poly_height=maxy-miny
                            initial_buffer_distance = max(3.0, (poly_width + poly_height) / 2 * 0.10)
-                           text_poly = bubble_polygon # Default
-                           try: shrunk = bubble_polygon.buffer(-initial_buffer_distance, join_style=2)
-                                if shrunk.is_valid and not shrunk.is_empty and shrunk.geom_type=='Polygon': text_poly = shrunk
-                                else: shrunk = bubble_polygon.buffer(-3.0, join_style=2);
-                                      if shrunk.is_valid and not shrunk.is_empty and shrunk.geom_type=='Polygon': text_poly = shrunk
-                           except Exception as buffer_err: print(f"⚠️ Warn: buffer error {buffer_err}")
+                           text_poly = bubble_polygon # Default value
+                           try:
+                               print(f"      Shrinking polygon by {initial_buffer_distance:.1f}...")
+                               shrunk = bubble_polygon.buffer(-initial_buffer_distance, join_style=2)
+                               # Use lowercase 'if'
+                               if shrunk.is_valid and not shrunk.is_empty and shrunk.geom_type == 'Polygon':
+                                   text_poly = shrunk # Use shrunk if valid
+                                   print(f"      Shrink successful.")
+                               else:
+                                   print(f"      Initial shrink failed, trying fallback (-3.0)...")
+                                   shrunk = bubble_polygon.buffer(-3.0, join_style=2)
+                                   # Use lowercase 'if'
+                                   if shrunk.is_valid and not shrunk.is_empty and shrunk.geom_type == 'Polygon':
+                                       text_poly = shrunk
+                                       print(f"      Fallback shrink successful.")
+                                   else:
+                                        print(f"      Fallback shrink failed. Using original.")
+                           except Exception as buffer_err:
+                               print(f"   ⚠️ Warn: Error during polygon buffer: {buffer_err}")
+                               print(f"      Using original polygon due to buffer error.")
+                           # --- END Shrink Polygon Block ---
 
                            # --- Call layout function (potentially placeholder) ---
                            text_settings = find_optimal_text_settings_final(temp_draw_for_settings, arabic_text, text_poly)
@@ -377,12 +376,11 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
     except StopIteration as stop_signal: # Catch early exit signal
         print(f"ℹ️ Task exited early SID {sid}: {stop_signal}")
-        # Saving and completion signal should have happened before raising StopIteration
     except Exception as e:
         print(f"❌❌❌ Unhandled error task SID {sid}: {e}"); traceback.print_exc(); emit_error(f"Unexpected server error ({type(e).__name__}).", sid)
     finally: # Cleanup Uploaded File
         try:
-            if image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
+            if 'image_path' in locals() and image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
         except Exception as cleanup_err: print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
 
 
@@ -425,7 +423,11 @@ def handle_start_processing(data):
         print(f"   Attempting task start...")
         try: socketio.start_background_task(process_image_task, upload_path, output_filename_base, mode, sid); print(f"   ✔️ Task initiated."); socketio.emit('processing_started', {'message': 'Upload OK! Processing...'}, room=sid)
         except Exception as task_err: print(f"❌ Failed start task: {task_err}"); traceback.print_exc(); emit_error(f"Server error starting task: {task_err}", sid);
-            if os.path.exists(upload_path): try: os.remove(upload_path); print(f"   🧹 Cleaned up (task start fail).") except Exception as cl_e: print(f"   ⚠️ Cleanup failed: {cl_e}")
+            # Corrected cleanup block (from previous fix)
+            print(f"   Attempting cleanup for failed task start: {upload_path}")
+            if os.path.exists(upload_path):
+                try: os.remove(upload_path); print(f"   🧹 Cleaned up file due to task start failure: {upload_path}")
+                except Exception as cleanup_err: print(f"   ⚠️ Could not clean up file after task start failure: {upload_path} - {cleanup_err}")
     else: emit_error("Server error (upload path missing).", sid)
     print(f"--- Finished handling 'start_processing' for SID: {sid} ---")
 
@@ -434,6 +436,5 @@ if __name__ == '__main__':
     print("--- Starting Manga Processor Web App ---")
     if not ROBOFLOW_API_KEY: print("⚠️ WARNING: ROBOFLOW_API_KEY not set!")
     if app.config['SECRET_KEY'] == 'change_this_in_production_!!!': print("⚠️ WARNING: Using default FLASK_SECRET_KEY!")
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 9000))
     print(f"   * Ready on http://0.0.0.0:{port}"); socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
-
