@@ -1,43 +1,88 @@
 <!DOCTYPE html>
-<html lang="en" dir="rtl">
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Manga Cleaner & Translator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <title>معالج فقاعات المانجا</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.2/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <h1>Manga Bubble Processor</h1>
+    <div class="container">
+        <header>
+            <h1>معالج فقاعات المانجا</h1>
+            <p>قم بتنظيف صفحات المانجا واستخرج النصوص أو قم بترجمتها وتطبيقها تلقائيًا.</p>
+        </header>
 
-    <div id="upload-section">
-        <label for="imageUpload">Choose Manga Page:</label>
-        <input type="file" id="imageUpload" accept="image/png, image/jpeg, image/webp">
+        <main>
+            <section id="upload-section" class="card">
+                <h2>1. رفع الصورة واختيار الوضع</h2>
+                <div class="form-group">
+                    <label for="imageUpload" class="btn btn-secondary">اختر صورة مانجا</label>
+                    <input type="file" id="imageUpload" accept="image/png, image/jpeg, image/webp" style="display: none;">
+                    <span id="fileName">لم يتم اختيار أي ملف</span>
+                </div>
 
-        <div>
-            <input type="checkbox" id="translateCheckbox">
-            <label for="translateCheckbox">Translate to Arabic?</label>
-        </div>
+                <div class="form-group">
+                    <label>اختر وضع المعالجة:</label>
+                    <div class="radio-group">
+                        <input type="radio" id="modeExtract" name="processingMode" value="extract" checked>
+                        <label for="modeExtract">تنظيف واستخراج النص المترجم (جدول)</label>
+                    </div>
+                    <div class="radio-group">
+                        <input type="radio" id="modeAuto" name="processingMode" value="auto">
+                        <label for="modeAuto">تنظيف وترجمة وتطبيق تلقائي</label>
+                    </div>
+                </div>
 
-        <button id="processButton" disabled>Upload and Process</button>
-    </div>
+                <button id="processButton" class="btn btn-primary" disabled>ابدأ المعالجة</button>
+            </section>
 
-    <div id="progress-section" style="display: none;">
-        <h2>Processing...</h2>
-        <progress id="progressBar" value="0" max="100"></progress>
-        <p id="progressText">Starting...</p>
-        <p id="errorText" style="color: red; display: none;"></p>
-    </div>
+            <section id="progress-section" class="card" style="display: none;">
+                <h2>جاري المعالجة...</h2>
+                <progress id="progressBar" value="0" max="100"></progress>
+                <p id="progressText">...</p>
+                <p id="errorText" class="error-message" style="display: none;"></p> </section>
 
-    <div id="result-section" style="display: none;">
-        <h2>Result</h2>
-        <img id="resultImage" src="#" alt="Processed Image" style="max-width: 80%; height: auto;">
-        <br>
-        <a id="downloadLink" href="#" download="processed_image.jpg">
-            <button>Download Result</button>
-        </a>
-    </div>
+            <section id="result-section" class="card" style="display: none;">
+                <h2>النتائج</h2>
 
-    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+                <div id="image-result-area" style="display: none;">
+                    <h3 id="image-result-title">الصورة المعالجة</h3> <img id="resultImage" src="#" alt="Processed Image">
+                     <a id="downloadLink" href="#" download="processed_image.jpg" class="btn btn-secondary">
+                        تحميل الصورة
+                    </a>
+                </div>
+
+                <div id="table-result-area" style="display: none;">
+                    <h3>النصوص المترجمة المستخرجة</h3>
+                    <div class="table-container"> <table id="translationsTable">
+                            <thead>
+                                <tr>
+                                    <th># الفقاعة</th>
+                                    <th>النص المترجم</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <button id="processAnotherButton" class="btn btn-secondary">معالجة صورة أخرى</button>
+            </section>
+
+            <section id="manual-edit-info" class="card info-card">
+                 <h2>ملاحظة حول التعديل اليدوي</h2>
+                 <p>خيار التعديل اليدوي للنصوص (تغيير الخط، الحجم، اللون، إضافة مربعات حوار) يتطلب تطويرًا إضافيًا كبيرًا وهو غير متاح حاليًا في هذه النسخة.</p>
+            </section>
+        </main>
+
+        <footer>
+            <p>Manga Processor &copy; 2025</p>
+        </footer>
+    </div> <script src="{{ url_for('static', filename='js/script.js') }}"></script>
 </body>
 </html>
