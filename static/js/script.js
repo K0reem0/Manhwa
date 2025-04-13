@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Get DOM Elements ---
     const imageUpload = document.getElementById('imageUpload');
-    const translateCheckbox = document.getElementById('translateCheckbox');
+    const fileNameSpan = document.getElementById('fileName');
     const processButton = document.getElementById('processButton');
     const uploadSection = document.getElementById('upload-section');
     const progressSection = document.getElementById('progress-section');
@@ -8,46 +9,136 @@ document.addEventListener('DOMContentLoaded', () => {
     const progressText = document.getElementById('progressText');
     const errorText = document.getElementById('errorText');
     const resultSection = document.getElementById('result-section');
+    const imageResultArea = document.getElementById('image-result-area');
+    const imageResultTitle = document.getElementById('image-result-title');
     const resultImage = document.getElementById('resultImage');
     const downloadLink = document.getElementById('downloadLink');
+    const tableResultArea = document.getElementById('table-result-area');
+    const translationsTableBody = document.getElementById('translationsTable').querySelector('tbody');
+    const processAnotherButton = document.getElementById('processAnotherButton');
+    const modeExtractRadio = document.getElementById('modeExtract');
+    const modeAutoRadio = document.getElementById('modeAuto');
 
     let selectedFile = null;
+    let currentMode = 'extract'; // Default mode
 
-    // Initialize Socket.IO connection
-    // Use ws:// or wss:// depending on your deployment (http vs https)
-    const socket = io(); // Connects to the same server that served the page
+    // --- Initialize Socket.IO ---
+    const socket = io(); // Connects to the server that served the page
 
+    // --- SocketIO Event Listeners ---
     socket.on('connect', () => {
-        console.log('Connected to server via Socket.IO');
-        // Enable upload button once connected and file is selected
+        console.log('Connected to server via Socket.IO:', socket.id);
+        // Enable button only if file is also selected
         if (selectedFile) {
             processButton.disabled = false;
         }
     });
 
     socket.on('disconnect', () => {
-        console.log('Disconnected from server');
-        // Optionally disable button or show message
-        processButton.disabled = true;
-        alert("Connection lost. Please refresh the page.");
+        console.warn('Disconnected from server');
+        processButton.disabled = true; // Disable on disconnect
+        alert("تم قطع الاتصال بالخادم. يرجى تحديث الصفحة.");
     });
 
+    socket.on('processing_started', (data) => {
+        console.log(data.message);
+        progressText.textContent = data.message;
+        progressBar.value = 5;
+    });
+
+    socket.on('progress_update', (data) => {
+        // console.log('Progress:', data);
+        progressBar.value = data.percentage;
+        // Display step number if available, otherwise just message
+        const stepPrefix = data.step ? `[${data.step}/6] ` : '';
+        progressText.textContent = `${stepPrefix}${data.message} (${data.percentage}%)`;
+        errorText.style.display = 'none'; // Hide error on progress
+    });
+
+    socket.on('processing_complete', (data) => {
+        console.log('Processing complete:', data);
+        progressText.textContent = 'اكتملت المعالجة!';
+        progressBar.value = 100;
+
+        // Hide progress, show results
+        progressSection.style.display = 'none';
+        resultSection.style.display = 'block';
+
+        // Clear previous results
+        imageResultArea.style.display = 'none';
+        tableResultArea.style.display = 'none';
+        translationsTableBody.innerHTML = ''; // Clear table
+
+        if (data.mode === 'extract') {
+            imageResultTitle.textContent = "الصورة المنظفة";
+            resultImage.src = data.imageUrl + '?t=' + new Date().getTime(); // Cache bust
+            downloadLink.href = data.imageUrl;
+            downloadLink.download = generateDownloadFilename(selectedFile?.name, "_cleaned");
+            imageResultArea.style.display = 'block';
+
+            if (data.translations && data.translations.length > 0) {
+                populateTable(data.translations);
+                tableResultArea.style.display = 'block';
+            } else {
+                 // Optionally show a message if no translations were extracted
+                 const row = translationsTableBody.insertRow();
+                 const cell = row.insertCell();
+                 cell.colSpan = 2; // Span across both columns
+                 cell.textContent = "لم يتم استخراج أي نصوص.";
+                 cell.style.textAlign = 'center';
+                 tableResultArea.style.display = 'block';
+            }
+
+        } else if (data.mode === 'auto') {
+            imageResultTitle.textContent = "الصورة المترجمة تلقائياً";
+            resultImage.src = data.imageUrl + '?t=' + new Date().getTime(); // Cache bust
+            downloadLink.href = data.imageUrl;
+            downloadLink.download = generateDownloadFilename(selectedFile?.name, "_translated");
+            imageResultArea.style.display = 'block';
+            // Table remains hidden for auto mode
+        }
+    });
+
+    socket.on('processing_error', (data) => {
+        console.error('Processing Error:', data.error);
+        errorText.textContent = `خطأ: ${data.error}`;
+        errorText.style.display = 'block';
+        // Keep progress section visible to show error, hide result
+        progressSection.style.display = 'block';
+        resultSection.style.display = 'none';
+        // Re-enable upload section so user can retry
+        uploadSection.style.display = 'block';
+        processButton.disabled = false; // Re-enable button
+    });
+
+    // --- DOM Event Listeners ---
     imageUpload.addEventListener('change', (event) => {
         selectedFile = event.target.files[0];
-        if (selectedFile && socket.connected) {
-            processButton.disabled = false;
+        if (selectedFile) {
+            fileNameSpan.textContent = selectedFile.name;
+             // Enable button only if socket is connected
+            processButton.disabled = !socket.connected;
+             resetResultArea(); // Clear old results if a new file is chosen
         } else {
+            fileNameSpan.textContent = 'لم يتم اختيار أي ملف';
             processButton.disabled = true;
         }
-        // Reset UI if a new file is chosen
-        resetUI();
     });
+
+     // Handle clicks on the hidden input's label
+     fileNameSpan.previousElementSibling.addEventListener('click', () => {
+          imageUpload.click();
+     });
+
 
     processButton.addEventListener('click', () => {
         if (!selectedFile) {
-            alert('Please select an image file first.');
+            alert('الرجاء اختيار ملف صورة أولاً.');
             return;
         }
+
+        // Determine selected mode
+        currentMode = modeAutoRadio.checked ? 'auto' : 'extract';
 
         // Show progress, hide upload/result
         uploadSection.style.display = 'none';
@@ -55,86 +146,74 @@ document.addEventListener('DOMContentLoaded', () => {
         resultSection.style.display = 'none';
         errorText.style.display = 'none';
         progressBar.value = 0;
-        progressText.textContent = 'Uploading...';
+        progressText.textContent = 'جارٍ رفع الصورة...';
         processButton.disabled = true; // Disable while processing
 
-        // Read file as Base64
+        // Read file as Base64 and send
         const reader = new FileReader();
         reader.onload = function(event) {
             const base64String = event.target.result;
-            const doTranslate = translateCheckbox.checked;
-
-            // Send data via Socket.IO
-            console.log('Sending start_processing event...');
+            console.log(`Sending start_processing (Mode: ${currentMode})...`);
             socket.emit('start_processing', {
-                file: base64String, // Send base64 data
-                translate: doTranslate
+                file: base64String,
+                mode: currentMode
             });
         };
         reader.onerror = function(error) {
              console.error("Error reading file:", error);
-             alert("Error reading file.");
-             resetUI(); // Go back to upload state
+             alert("حدث خطأ أثناء قراءة الملف.");
+             resetToUploadState();
         };
-        reader.readAsDataURL(selectedFile); // Read as Data URL (includes base64)
+        reader.readAsDataURL(selectedFile);
     });
 
-    // Listen for progress updates from server
-    socket.on('progress_update', (data) => {
-        console.log('Progress:', data);
-        progressBar.value = data.percentage;
-        progressText.textContent = `Step ${data.step}: ${data.message} (${data.percentage}%)`;
-        errorText.style.display = 'none'; // Hide error if progress occurs
-    });
-
-    // Listen for completion event
-    socket.on('processing_complete', (data) => {
-        console.log('Processing complete:', data);
-        progressText.textContent = 'Done!';
-        progressBar.value = 100;
-        resultImage.src = data.result_url + '?t=' + new Date().getTime(); // Add timestamp to prevent caching
-        downloadLink.href = data.result_url;
-        downloadLink.download = selectedFile.name.replace(/\.[^/.]+$/, "") + "_processed.jpg"; // Suggest a download name
-
-        progressSection.style.display = 'none';
-        resultSection.style.display = 'block';
-        // Re-enable button for next file AFTER result is shown
-         // processButton.disabled = false; // Keep disabled until new file selected
-        imageUpload.value = null; // Clear the file input
-        selectedFile = null; // Reset selected file
-         uploadSection.style.display = 'block'; // Show upload again
-    });
-
-    // Listen for error events
-    socket.on('processing_error', (data) => {
-        console.error('Processing Error:', data.error);
-        errorText.textContent = `Error: ${data.error}`;
-        errorText.style.display = 'block';
-        progressSection.style.display = 'block'; // Keep progress section visible to show error
-        resultSection.style.display = 'none';
-        // Re-enable button and show upload section so user can retry
-        processButton.disabled = false;
-        uploadSection.style.display = 'block';
-
-    });
-
-     socket.on('processing_started', (data) => {
-         console.log(data.message);
-         progressText.textContent = data.message;
-         progressBar.value = 5; // Indicate it has started
+     processAnotherButton.addEventListener('click', () => {
+         resetToUploadState();
      });
 
-    function resetUI() {
-        progressSection.style.display = 'none';
-        resultSection.style.display = 'none';
-        uploadSection.style.display = 'block';
-        errorText.style.display = 'none';
-        progressBar.value = 0;
-        progressText.textContent = 'Starting...';
-        resultImage.src = "#"; // Clear previous image
-        downloadLink.href = "#";
-         // Enable button only if file selected AND socket connected
-        processButton.disabled = !(selectedFile && socket.connected);
+    // --- Helper Functions ---
+    function populateTable(translations) {
+        translationsTableBody.innerHTML = ''; // Clear previous entries
+        translations.forEach(item => {
+            const row = translationsTableBody.insertRow();
+            const cellId = row.insertCell();
+            const cellText = row.insertCell();
+            cellId.textContent = item.id;
+            // Preserve line breaks from translation if any
+            cellText.innerHTML = item.translation.replace(/\n/g, '<br>');
+        });
     }
 
+     function generateDownloadFilename(originalName, suffix) {
+         const defaultName = "processed_image";
+         let baseName = defaultName;
+         if (originalName) {
+             // Remove extension from original name
+             baseName = originalName.split('.').slice(0, -1).join('.');
+             if (!baseName) baseName = defaultName; // Handle names like ".png"
+         }
+         return `${baseName}${suffix}.jpg`; // Assume JPG output
+     }
+
+    function resetResultArea() {
+        resultSection.style.display = 'none';
+        imageResultArea.style.display = 'none';
+        tableResultArea.style.display = 'none';
+        resultImage.src = "#";
+        downloadLink.href = "#";
+        translationsTableBody.innerHTML = '';
+    }
+
+     function resetToUploadState() {
+         resetResultArea();
+         progressSection.style.display = 'none';
+         uploadSection.style.display = 'block';
+         imageUpload.value = null; // Clear file input visually
+         selectedFile = null;
+         fileNameSpan.textContent = 'لم يتم اختيار أي ملف';
+         processButton.disabled = true; // Disable until file selected again
+         errorText.style.display = 'none';
+     }
+
 });
+
