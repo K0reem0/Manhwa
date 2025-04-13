@@ -461,7 +461,9 @@ def handle_start_processing(data):
 # --- Main Execution ---
 if __name__ == '__main__':
     print("Starting Flask-SocketIO server...")
+    # Get port from environment variable or default to 5000 for local dev
+    port = int(os.environ.get('PORT', 9000))
+    print(f"Attempting to bind to host 0.0.0.0 and port {port}")
     # Use eventlet web server recommended for Flask-SocketIO
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
-    # When deploying, use a proper WSGI server like Gunicorn with eventlet workers:
-    # gunicorn --worker-class eventlet -w 1 app:app
+    # Set debug=False for production on Heroku
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
