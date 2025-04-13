@@ -68,7 +68,7 @@ except ImportError:
 
     # This line MUST also be indented under the 'except' block, after the class definition.
     text_formatter = DummyTextFormatter()
-    print("⚠️ WARNING: Using dummy 'text_formatter' due to import error. Text rendering might fail or look incorrect."
+    print("⚠️ WARNING: Using dummy 'text_formatter' due to import error. Text rendering might fail or look incorrect.")
 
 
 load_dotenv() # Load environment variables from .env
