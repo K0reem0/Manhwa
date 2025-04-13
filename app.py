@@ -24,17 +24,51 @@ eventlet.monkey_patch() # Patch standard libraries for async operations
 # --- IMPORT YOUR MODULE ---
 try:
     import text_formatter # Assuming text_formatter.py is in the same directory
+    print("✔️ Successfully imported 'text_formatter.py'.")
 except ImportError:
     print("❌ ERROR: Cannot import 'text_formatter.py'. Make sure the file exists.")
-    # Define dummy functions if module is missing, so the app can at least start
-    # This helps diagnose import issues vs. runtime issues.
+    # Define dummy class and functions *only* if the import fails.
+    # Ensure this class definition is correctly indented under the 'except' block.
     class DummyTextFormatter:
-        def set_arabic_font_path(self, path): pass
-        def get_font(self, size): return None # Crucial: Return None if font cannot load
-        def format_arabic_text(self, text): return text # Return raw text
-        def layout_balanced_text(self, draw, text, font, target_width): return text # Simple fallback
+        """A fallback class if text_formatter module fails to import."""
+        def __init__(self):
+            print("⚠️ WARNING: Initializing DummyTextFormatter. Real text formatting will NOT work.")
+            self._font_path = None # Keep track internally
+
+        def set_arabic_font_path(self, path):
+            print(f"   (Dummy) Ignoring font path: {path}")
+            self._font_path = path # Store it, though we won't use it effectively
+
+        def get_font(self, size):
+            print(f"   (Dummy) Attempting to get font size {size}.")
+            # Try loading a basic default font if Pillow is available
+            try:
+                from PIL import ImageFont
+                try:
+                    # Try loading the specific font if path was set, even if formatting fails
+                    if self._font_path and os.path.exists(self._font_path):
+                         return ImageFont.truetype(self._font_path, size)
+                    # Fallback to default font included with Pillow (may not exist everywhere)
+                    return ImageFont.load_default()
+                except IOError:
+                    print("   (Dummy) Could not load default PIL font or specified font.")
+                    return None # Return None if font loading fails
+            except ImportError:
+                 print("   (Dummy) PIL.ImageFont not available.")
+                 return None # Return None if Pillow isn't installed
+
+        def format_arabic_text(self, text):
+            print("   (Dummy) Returning raw text (no Arabic reshaping).")
+            return text # Return raw text, no processing
+
+        def layout_balanced_text(self, draw, text, font, target_width):
+             print("   (Dummy) Returning raw text for layout (no wrapping).")
+             # Basic fallback: just return the un-wrapped text
+             return text
+
+    # This line MUST also be indented under the 'except' block, after the class definition.
     text_formatter = DummyTextFormatter()
-    print("⚠️ WARNING: Using dummy 'text_formatter' due to import error.")
+    print("⚠️ WARNING: Using dummy 'text_formatter' due to import error. Text rendering might fail or look incorrect."
 
 
 load_dotenv() # Load environment variables from .env
