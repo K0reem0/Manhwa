@@ -9,9 +9,10 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from requests.exceptions import RequestException
 import re
-from shapely.geometry import Polygon, MultiPolygon # Keep both imports
+from shapely.geometry import Polygon, MultiPolygon
 from shapely.validation import make_valid
 import uuid
+# Make sure jsonify is imported
 from flask import Flask, request, render_template, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
@@ -45,8 +46,13 @@ UPLOAD_FOLDER = 'uploads'; RESULT_FOLDER = 'results'; ALLOWED_EXTENSIONS = {'png
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
 # --- Flask App Setup ---
 app = Flask(__name__); app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'change_this_in_production')
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER; app.config['RESULT_FOLDER'] = RESULT_FOLDER; app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER; app.config['RESULT_FOLDER'] = RESULT_FOLDER;
+# This now correctly limits HTTP upload size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 16MB Limit
+
+# REMOVED max_http_buffer_size - Not needed for upload part anymore
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*", logger=False, engineio_logger=False)
+
 # --- Ensure directories exist ---
 try: os.makedirs(UPLOAD_FOLDER, exist_ok=True); os.makedirs(RESULT_FOLDER, exist_ok=True); print(f"✔️ Directories verified/created.")
 except OSError as e: print(f"❌ CRITICAL ERROR creating directories: {e}"); sys.exit(1)
@@ -81,22 +87,24 @@ TRANSLATION_PROMPT = 'ترجم هذا النص داخل فقاعة المانج�
 
 # --- Helper Functions ---
 def emit_progress(step, message, percentage, sid):
+    # Use socketio.emit correctly outside of request context
     socketio.emit('progress_update', {'step': step, 'message': message, 'percentage': percentage}, room=sid)
     socketio.sleep(0.01)
 def emit_error(message, sid):
     print(f"SID: {sid} | ❗ ERROR Emitted: {message}")
+    # Use socketio.emit correctly outside of request context
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01)
 
-# --- Core Functions ---
+# --- Core Functions (get_roboflow_predictions, extract_translation, ask_luminai, find_optimal_text_settings_final, draw_text_on_layer) ---
+# These functions remain largely the same as the last correct version using original logic
+# Make sure ask_luminai uses socketio.sleep
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=30):
-    model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"
-    print(f"ℹ️ Calling Roboflow ({model_name})...")
+    model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"; print(f"ℹ️ Calling Roboflow ({model_name})...")
     if not api_key: raise ValueError("Missing Roboflow API Key.")
     try:
         response = requests.post(f"{endpoint_url}?api_key={api_key}", data=image_b64, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=timeout)
-        response.raise_for_status(); data = response.json(); predictions = data.get("predictions", [])
-        print(f"✔️ Roboflow ({model_name}) response received. Predictions: {len(predictions)}")
+        response.raise_for_status(); data = response.json(); predictions = data.get("predictions", []); print(f"✔️ Roboflow ({model_name}) response received. Predictions: {len(predictions)}")
         return predictions
     except requests.exceptions.Timeout as timeout_err: print(f"❌ Roboflow ({model_name}) Timeout: {timeout_err}"); raise ConnectionError(f"Roboflow API ({model_name}) timed out.") from timeout_err
     except requests.exceptions.HTTPError as http_err: print(f"❌ Roboflow ({model_name}) HTTP Error: Status {http_err.response.status_code}"); print(f"   Response: {http_err.response.text[:200]}"); raise ConnectionError(f"Roboflow API ({model_name}) failed (Status {http_err.response.status_code}).") from http_err
@@ -119,32 +127,22 @@ def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
             response = requests.post(url, json=payload, headers=headers, timeout=timeout_seconds)
             if response.status_code == 200:
                 result_text = response.json().get("result", ""); translation = extract_translation(result_text.strip())
-                print(f"✔️ LuminAI translation received: '{translation[:50]}...'")
-                return translation
+                print(f"✔️ LuminAI translation received: '{translation[:50]}...'"); return translation
             elif response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 5)); print(f"⚠️ Rate limit (429). Retrying after {retry_after}s...")
-                if sid: emit_progress(-1, f"Translation busy. Retrying...", -1, sid); socketio.sleep(retry_after)
+                if sid: emit_progress(-1, f"Translation busy. Retrying...", -1, sid); socketio.sleep(retry_after) # Use SocketIO sleep
             else:
                 print(f"❌ LuminAI failed: Status {response.status_code} - {response.text[:150]}")
-                if sid: emit_error(f"Translation failed (Status {response.status_code}).", sid)
-                return "" # Stop retrying other errors
+                if sid: emit_error(f"Translation failed (Status {response.status_code}).", sid); return ""
         except RequestException as e:
             print(f"❌ Network error LuminAI (Attempt {attempt+1}): {e}")
-            if attempt == max_retries - 1:
-                print("   ❌ LuminAI failed after max retries (network).")
-                if sid: emit_error("Translation connection failed.", sid)
-                return ""
-            else:
-                wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time)
+            if attempt == max_retries - 1: print("   ❌ LuminAI failed after max retries (network)."); emit_error("Translation connection failed.", sid); return ""
+            else: wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time) # Use SocketIO sleep
         except Exception as e:
             print(f"❌ Unexpected error LuminAI (Attempt {attempt+1}): {e}"); traceback.print_exc(limit=1)
-            if attempt == max_retries - 1:
-                 print("   ❌ LuminAI failed after max retries (unexpected).")
-                 if sid: emit_error("Unexpected translation error.", sid); return ""
-            else:
-                 socketio.sleep(2)
-    print("   ❌ LuminAI failed after all retries.");
-    if sid: emit_error("Translation unavailable.", sid); return ""
+            if attempt == max_retries - 1: print("   ❌ LuminAI failed after max retries (unexpected)."); emit_error("Unexpected translation error.", sid); return ""
+            else: socketio.sleep(2) # Use SocketIO sleep
+    print("   ❌ LuminAI failed after all retries."); emit_error("Translation unavailable.", sid); return ""
 
 def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     print("ℹ️ Finding optimal text settings...")
@@ -152,7 +150,7 @@ def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     if not text: print("   ⚠️ Empty text."); return None
     if isinstance(text_formatter, DummyTextFormatter): print("   ⚠️ Cannot find settings: DummyFormatter active."); return None
 
-    best_fit = None
+    best_fit = None;
     for font_size in range(65, 4, -1):
         font = text_formatter.get_font(font_size)
         if font is None: continue
@@ -199,7 +197,8 @@ def draw_text_on_layer(text_settings, image_size):
         print(f"   ✔️ Drew text '{text_to_draw[:20]}...' at ({x},{y}) size {font_size}"); return text_layer
     except Exception as e: print(f"❌ Error in draw_text_on_layer: {e}"); traceback.print_exc(limit=1); return Image.new('RGBA', image_size, (0, 0, 0, 0))
 
-# --- Main Processing Task (Reverted Logic where requested) ---
+
+# --- Main Processing Task (Takes filepath, uses Original Logic) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
     """ Core logic: Uses original script's geometry validation & text handling. """
     start_time = time.time(); inpainted_image_cv = None; final_image_np = None; translations_list = []
@@ -246,7 +245,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         except Exception as e: print(f"❌ Error during text detection/inpainting: {e}. Skipping text removal."); emit_error("Text processing error.", sid)
 
         # === Step 2: Detect Bubbles ===
-        emit_progress(2, "Detecting bubbles...", 30, sid); b64_bubble = b64_image_text # Use same b64 as original
+        emit_progress(2, "Detecting bubbles...", 30, sid); b64_bubble = b64_image_text
         if not b64_bubble: raise ValueError("Missing base64 data for bubble detection.")
         bubble_predictions = []
         try:
@@ -270,7 +269,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
              if image_pil: # Only proceed if PIL conversion worked
                  temp_draw_for_settings = ImageDraw.Draw(Image.new('RGBA', (1, 1))); image_size = image_pil.size
                  bubble_count = len(bubble_predictions); processed_count = 0; base_progress = 45; max_progress_bubbles = 90
-                 original_image_for_cropping = image.copy() # Keep a copy of the *original* for cropping context
+                 original_image_for_cropping = image.copy() # Keep original for cropping
 
                  for i, pred in enumerate(bubble_predictions):
                      try: # Original style try/except per bubble
@@ -298,9 +297,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                           minx_orig, miny_orig, maxx_orig, maxy_orig = map(int, original_polygon.bounds)
                           minx_orig, miny_orig = max(0, minx_orig), max(0, miny_orig); maxx_orig, maxy_orig = min(w_img, maxx_orig), min(h_img, maxy_orig)
                           if maxx_orig <= minx_orig or maxy_orig <= miny_orig: print("   Skipping bubble: Invalid crop."); continue
-
-                          # Crop from the copy of original image
-                          bubble_crop = original_image_for_cropping[miny_orig:maxy_orig, minx_orig:maxx_orig]
+                          bubble_crop = original_image_for_cropping[miny_orig:maxy_orig, minx_orig:maxx_orig] # Crop original copy
                           if bubble_crop.size == 0: print("   Skipping bubble: Crop empty."); continue
                           _, crop_buffer = cv2.imencode('.jpg', bubble_crop);
                           if crop_buffer is None: print("   Skipping bubble: Failed encode crop."); continue
@@ -308,8 +305,8 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
                           print("   Requesting translation from LuminAI...")
                           translation_prompt_orig = 'ترجم نص المانجا هذا إلى اللغة العربية بحيث تكون الترجمة مفهومة وتوصل المعنى الى القارئ. أرجو إرجاع الترجمة فقط بين علامتي اقتباس مثل "النص المترجم". مع مراعاة النبرة والانفعالات الظاهرة في كل سطر (مثل: الصراخ، التردد، الهمس) وأن تُترجم بطريقة تُحافظ على الإيقاع المناسب للفقاعة.'
-                          translation = ask_luminai(translation_prompt_orig, crop_bytes, sid=sid) # Use original prompt
-                          if not translation: print("   Skipping bubble: Translation failed or empty."); continue # Skip if empty like original
+                          translation = ask_luminai(translation_prompt_orig, crop_bytes, sid=sid)
+                          if not translation: print("   Skipping bubble: Translation failed or empty."); continue
                           print(f"   Translation received: '{translation}'")
 
                           if mode == 'extract': translations_list.append({'id': i + 1, 'translation': translation}); processed_count += 1
@@ -361,7 +358,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
             if save_success:
                 processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s."); emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
-                # --- CORRECTED BLOCK ---
+                # --- CORRECTED RESULT DATA BLOCK ---
                 if not result_data:
                     print("⚠️ Result data empty. Creating default.")
                     result_data = {
@@ -382,75 +379,154 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             if image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
         except Exception as cleanup_err: print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
 
-# --- Flask Routes & Handlers (Keep unchanged) ---
+
+# ==================================================
+# NEW UPLOAD ROUTE and MODIFIED SOCKETIO HANDLERS
+# ==================================================
+
+# --- NEW: Flask Route for HTTP File Upload ---
+@app.route('/upload', methods=['POST'])
+def handle_file_upload():
+    # Get SocketIO SID and mode from query parameters
+    # Client-side JS needs to add these when calling fetch('/upload?sid=...')
+    sid = request.args.get('sid')
+    mode = request.args.get('mode', 'auto') # Default to 'auto' if not provided
+
+    if not sid:
+        print("❌ Upload Error: Missing sid query parameter.")
+        # Cannot easily emit error to specific client without sid
+        return jsonify({"error": "Missing session identifier"}), 400
+
+    print(f"\n--- Received HTTP Upload for SID: {sid}, Mode: {mode} ---")
+
+    if 'file' not in request.files:
+        print(f"   SID {sid}: Upload Error: No file part in request.")
+        emit_error('Upload error: No file part.', sid)
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file'] # Get the file object
+
+    if file.filename == '':
+        print(f"   SID {sid}: Upload Error: No file selected.")
+        emit_error('Upload error: No file selected.', sid)
+        return jsonify({"error": "No selected file"}), 400
+
+    # --- Basic File Validation ---
+    filename = file.filename # Use werkzeug's secure_filename? Maybe not needed for internal processing
+    print(f"   SID {sid}: Received file: {filename}")
+    file_ext = ""
+    if '.' in filename:
+        file_ext = filename.rsplit('.', 1)[1].lower()
+
+    if file_ext not in ALLOWED_EXTENSIONS:
+         print(f"   SID {sid}: Upload Error: Invalid file type: {file_ext}")
+         emit_error(f'Upload error: Invalid file type ({file_ext}).', sid)
+         return jsonify({"error": f"Invalid file type: {file_ext}"}), 400
+
+    # --- Save the File ---
+    upload_dir = app.config['UPLOAD_FOLDER']
+    if not os.path.isdir(upload_dir) or not os.access(upload_dir, os.W_OK):
+        print(f"❌ ERROR: Upload directory '{upload_dir}' inaccessible.")
+        emit_error("Server config error.", sid)
+        return jsonify({"error": "Server configuration error"}), 500
+
+    upload_path = None
+    try:
+        unique_id = uuid.uuid4()
+        input_filename = f"{unique_id}.{file_ext}"
+        output_filename_base = f"{unique_id}"
+        upload_path = os.path.join(upload_dir, input_filename)
+
+        file.save(upload_path) # Use Flask's save method for uploaded files
+        print(f"   SID {sid}: File saved via HTTP: {upload_path}")
+
+        # --- Start Background Task ---
+        print(f"   SID {sid}: Attempting to start background task...")
+        try:
+            socketio.start_background_task(
+                process_image_task,
+                upload_path,          # Pass the path to the saved file
+                output_filename_base,
+                mode,
+                sid
+            )
+            print(f"   SID {sid}: Background task initiated successfully.")
+            # Send confirmation *back* to the specific client via SocketIO
+            emit_progress(0, 'Upload successful! Processing started...', 5, sid) # Reuse emit_progress
+            # Return success response for the HTTP request
+            return jsonify({"message": "Upload successful, processing started."}), 200
+
+        except Exception as task_start_err:
+            print(f"❌ CRITICAL: Failed start task for SID {sid}: {task_start_err}"); traceback.print_exc()
+            emit_error(f"Server error starting task.", sid)
+            # Cleanup the uploaded file if task fails to start
+            if upload_path and os.path.exists(upload_path):
+                 try: os.remove(upload_path); print(f"   🧹 Cleaned up '{upload_path}'")
+                 except Exception as cl_err: print(f"   ⚠️ Error cleaning up: {cl_err}")
+            return jsonify({"error": "Server failed to start processing"}), 500
+
+    except Exception as e:
+        # Catch errors during validation or saving
+        print(f"❌ Error handling upload for SID {sid}: {e}")
+        traceback.print_exc()
+        emit_error(f'Server error during upload: {type(e).__name__}', sid)
+        # Cleanup partially saved file if it exists
+        if upload_path and os.path.exists(upload_path):
+             try: os.remove(upload_path); print(f"   🧹 Cleaned up '{upload_path}'")
+             except Exception as cl_err: print(f"   ⚠️ Error cleaning up: {cl_err}")
+        return jsonify({"error": "Server error handling upload"}), 500
+
+# --- MODIFIED: SocketIO Handlers ---
+@socketio.on('connect')
+def handle_connect():
+    # Send the client their SID upon connection, they might need it for the upload URL
+    print(f"✅ Client connected: {request.sid}")
+    emit('your_sid', {'sid': request.sid}) # Send SID back to the connecting client
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f"❌ Client disconnected: {request.sid}")
+
+@socketio.on('start_processing_request') # Renamed event to avoid confusion
+def handle_start_request(data):
+    """
+    Handles the INITIAL request from the client BEFORE file upload.
+    It just acknowledges the request and tells the client to proceed with HTTP upload.
+    """
+    sid = request.sid
+    mode = data.get('mode', 'auto') # Client should send the mode here
+    print(f"\n--- Received 'start_processing_request' event SID: {sid} ---")
+    print(f"   Mode selected: '{mode}'")
+
+    # Tell the client to initiate the actual file upload via HTTP POST
+    # The client needs to include its sid in the POST request URL
+    emit('initiate_http_upload', {'mode': mode}, room=sid) # Send back mode for confirmation
+
+    print(f"--- Instructed SID {sid} to initiate HTTP upload ---")
+
+
+# --- Flask Routes (Results and Index) ---
 @app.route('/')
 def index(): return render_template('index.html')
+
 @app.route('/results/<path:filename>')
 def get_result_image(filename):
     if '..' in filename or filename.startswith('/'): return "Invalid filename", 400
     results_dir = os.path.abspath(app.config['RESULT_FOLDER'])
     try: return send_from_directory(results_dir, filename, as_attachment=False)
     except FileNotFoundError: return "File not found", 404
-@socketio.on('connect')
-def handle_connect(): print(f"✅ Client connected: {request.sid}")
-@socketio.on('disconnect')
-def handle_disconnect(): print(f"❌ Client disconnected: {request.sid}")
-@socketio.on('start_processing')
-def handle_start_processing(data):
-    sid = request.sid; print(f"\n--- Received 'start_processing' event SID: {sid} ---")
-    if not isinstance(data, dict): emit_error("Invalid request.", sid); return
-    print(f"   Data keys: {list(data.keys())}"); file_data_str = data.get('file'); mode = data.get('mode')
-    if not file_data_str or not isinstance(file_data_str, str) or not file_data_str.startswith('data:image'): emit_error('Invalid image data URI.', sid); return
-    if mode not in ['extract', 'auto']: emit_error(f"Invalid mode ('{mode}').", sid); return
-    print(f"   Mode: '{mode}'"); upload_dir = app.config['UPLOAD_FOLDER']
-    if not os.path.isdir(upload_dir) or not os.access(upload_dir, os.W_OK): print(f"❌ ERROR: Upload dir '{upload_dir}' inaccessible."); emit_error("Server config error.", sid); return
-    upload_path = None
-    try:
-        header, encoded = file_data_str.split(',', 1); file_extension_match = re.search(r'data:image/(\w+)', header)
-        if not file_extension_match: emit_error('Cannot determine file type.', sid); return
-        file_extension = file_extension_match.group(1).lower()
-        if file_extension not in ALLOWED_EXTENSIONS: emit_error(f'Invalid file type: {file_extension}.', sid); return
-        file_bytes = base64.b64decode(encoded)
-        if not file_bytes: emit_error('Empty file data.', sid); return
-        if len(file_bytes) > app.config['MAX_CONTENT_LENGTH']: emit_error(f"File too large.", sid); return
-        unique_id = uuid.uuid4(); input_filename = f"{unique_id}.{file_extension}"; output_filename_base = f"{unique_id}"
-        upload_path = os.path.join(upload_dir, input_filename);
-        with open(upload_path, 'wb') as f: f.write(file_bytes)
-        print(f"   ✔️ File saved: {upload_path} ({len(file_bytes)/1024:.1f} KB)")
-    except (ValueError, TypeError, IndexError) as decode_err: print(f"❌ Decode error: {decode_err}"); emit_error('Error processing image data.', sid); return
-    except base64.binascii.Error as b64_err: print(f"❌ Base64 error: {b64_err}"); emit_error('Invalid Base64 data.', sid); return
-    except IOError as io_err:
-         print(f"❌ File write error: {io_err}"); emit_error('Server error saving upload.', sid)
-         if upload_path and os.path.exists(upload_path):
-             try: os.remove(upload_path); print(f"   🧹 Cleaned up partial file.")
-             except Exception as cleanup_err_io: print(f"   ⚠️ Error cleaning up after IO error: {cleanup_err_io}")
-         return
-    except Exception as e:
-        print(f"❌ Unexpected file handling error: {e}"); traceback.print_exc(); emit_error(f'Server upload error.', sid)
-        if upload_path and os.path.exists(upload_path):
-             try: os.remove(upload_path); print(f"   🧹 Cleaned up file after unexpected save error.")
-             except Exception as cleanup_err_unexp: print(f"   ⚠️ Error cleaning up after unexpected save error: {cleanup_err_unexp}")
-        return
-    if upload_path:
-        print(f"   Attempting start background task...")
-        try: socketio.start_background_task( process_image_task, upload_path, output_filename_base, mode, sid ); print(f"   ✔️ Task initiated SID {sid}."); socketio.emit('processing_started', {'message': 'Processing started...'}, room=sid)
-        except Exception as task_start_err:
-            print(f"❌ CRITICAL: Failed start task: {task_start_err}"); traceback.print_exc(); emit_error(f"Server error starting task.", sid)
-            if os.path.exists(upload_path):
-                try: os.remove(upload_path); print(f"   🧹 Cleaned up file.")
-                except Exception as cleanup_err_start: print(f"   ⚠️ Error cleaning up after task start failure: {cleanup_err_start}")
-    else: print("❌ Internal Error: upload_path not set."); emit_error("Internal server error.", sid)
-    print(f"--- Finished handle 'start_processing' SID: {sid} ---")
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    print("--- Starting Manga Processor Web App ---")
+    print("--- Starting Manga Processor Web App (HTTP Upload Mode) ---")
     if not ROBOFLOW_API_KEY: print("███ WARNING: ROBOFLOW_API_KEY env var not set! ███")
     if app.config['SECRET_KEY'] == 'change_this_in_production': print("⚠️ WARNING: Using default Flask SECRET_KEY!")
     port = int(os.environ.get('PORT', 5000))
     print(f"   * Flask App: {app.name}"); print(f"   * Upload Folder: {os.path.abspath(app.config['UPLOAD_FOLDER'])}"); print(f"   * Result Folder: {os.path.abspath(app.config['RESULT_FOLDER'])}")
     print(f"   * Allowed Ext: {ALLOWED_EXTENSIONS}"); print(f"   * Text Formatter: {'Dummy' if isinstance(text_formatter, DummyTextFormatter) else 'Loaded'}")
     print(f"   * SocketIO Async: {socketio.async_mode}"); print(f"   * Roboflow Key: {'Yes' if ROBOFLOW_API_KEY else 'NO (!)'}")
+    print(f"   * Max Upload Size (HTTP): {app.config['MAX_CONTENT_LENGTH'] // 1024 // 1024} MB")
     print(f"   * Starting server http://0.0.0.0:{port}")
     try: socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
     except Exception as run_err: print(f"❌❌❌ Failed start server: {run_err}"); sys.exit(1)
+
