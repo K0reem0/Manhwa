@@ -112,8 +112,7 @@ def emit_error(message, sid):
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01) # Allow eventlet context switching
 
-# --- Integrated Core Logic Functions ---
-
+# --- Integrated Core Logic Functions --- (Keep these as they were in the previous correct version)
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=30):
     """Calls a Roboflow inference endpoint and returns predictions."""
     model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"
@@ -403,7 +402,7 @@ def draw_text_on_layer(text_settings, image_size):
         # Return an empty layer on error to avoid crashing the composition step
         return Image.new('RGBA', image_size, (0, 0, 0, 0))
 
-# --- Main Processing Task ---
+# --- Main Processing Task --- (Keep as previous correct version)
 def process_image_task(image_path, output_filename_base, mode, sid):
     """ Core logic: Cleans, optionally translates, and draws text based on mode. """
     start_time = time.time()
@@ -922,13 +921,28 @@ def handle_start_processing(data):
     except IOError as io_err:
          print(f"❌ File writing error: {io_err}")
          emit_error('Server error saving uploaded file.', sid)
+         # --- THIS IS THE SECOND CORRECTED BLOCK ---
          # Clean up partially saved file if it exists
-         if upload_path and os.path.exists(upload_path): try: os.remove(upload_path) except Exception: pass
-         return
+         if upload_path and os.path.exists(upload_path):
+             try:
+                 os.remove(upload_path)
+                 print(f"   🧹 Cleaned up partially saved file '{upload_path}' due to IO error.")
+             except Exception as cleanup_err_io:
+                 # Log error during cleanup but continue to return
+                 print(f"   ⚠️ Error cleaning up file '{upload_path}' after IO error: {cleanup_err_io}")
+         # --- END OF SECOND CORRECTION ---
+         return # Important: return after handling the IO error
     except Exception as e:
         print(f"❌ Unexpected file handling error: {e}")
         traceback.print_exc()
         emit_error(f'Server error during file upload: {type(e).__name__}', sid)
+        # Attempt cleanup even for unexpected errors if path was determined
+        if upload_path and os.path.exists(upload_path):
+             try:
+                 os.remove(upload_path)
+                 print(f"   🧹 Cleaned up file '{upload_path}' due to unexpected error during save.")
+             except Exception as cleanup_err_unexp:
+                 print(f"   ⚠️ Error cleaning up file '{upload_path}' after unexpected save error: {cleanup_err_unexp}")
         return
 
     # --- Start Background Task ---
@@ -952,14 +966,14 @@ def handle_start_processing(data):
             print(f"❌ CRITICAL: Failed to start background task: {task_start_err}")
             traceback.print_exc()
             emit_error(f"Server error: Could not start image processing task ({task_start_err}).", sid)
-            # --- THIS IS THE CORRECTED INDENTATION BLOCK ---
+            # --- THIS IS THE FIRST CORRECTED BLOCK (remains correct) ---
             # Attempt to clean up the uploaded file if task failed to start
             if os.path.exists(upload_path):
                 try:
                     os.remove(upload_path)
                     print(f"   🧹 Cleaned up file '{upload_path}' due to task start failure.")
-                except Exception as cleanup_err:
-                    print(f"   ⚠️ Error cleaning up file '{upload_path}' after task start failure: {cleanup_err}")
+                except Exception as cleanup_err_start:
+                    print(f"   ⚠️ Error cleaning up file '{upload_path}' after task start failure: {cleanup_err_start}")
             # -----------------------------------------------
 
     else:
@@ -999,4 +1013,3 @@ if __name__ == '__main__':
     except Exception as run_err:
          print(f"❌❌❌ Failed to start SocketIO server: {run_err}")
          sys.exit(1)
-
