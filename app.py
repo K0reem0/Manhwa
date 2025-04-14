@@ -25,7 +25,7 @@ try:
     import text_formatter # Assuming text_formatter.py is in the same directory
     print("✔️ Successfully imported 'text_formatter.py'.")
     if not all(hasattr(text_formatter, func) for func in ['set_arabic_font_path', 'get_font', 'format_arabic_text', 'layout_balanced_text']):
-         print("⚠️ WARNING: 'text_formatter.py' seems to be missing required functions!")
+         print("⚠️ WARNING: 'text_formatter.py' may be missing required functions!")
 except ImportError as import_err:
     print(f"❌ ERROR: Cannot import 'text_formatter.py': {import_err}")
     class DummyTextFormatter: # Define dummy only if import fails
@@ -225,9 +225,9 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
         if np.any(text_mask) and polygons_drawn > 0:
             emit_progress(1, f"Inpainting {polygons_drawn} areas...", 20, sid)
-            # --- CORRECTED try...except block for inpainting (Fixes SyntaxError) ---
+            # --- CORRECTED try...except block for inpainting ---
             try:
-                print("   Attempting cv2.inpaint...") # Add log
+                print("   Attempting cv2.inpaint...")
                 inpainted_image = cv2.inpaint(result_image, text_mask, 10, cv2.INPAINT_NS) # Use INPAINT_NS
                 if inpainted_image is None:
                     print("   ❌ ERROR: cv2.inpaint returned None!")
@@ -287,7 +287,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                       bubble_crop = original_image_for_cropping[miny_c:maxy_c, minx_c:maxx_c]
                       if bubble_crop.size == 0: print(f"   Skip bbl {i+1}: Empty crop area"); continue
 
-                      # --- Corrected Encoding Check (Fixes UnboundLocalError) ---
+                      # --- CORRECTED Encoding Check ---
                       print(f"   Encoding bubble crop {i+1}...")
                       retval, crop_buffer_enc = cv2.imencode('.jpg', bubble_crop)
                       if not retval: print(f"   ⚠️ Failed encode crop {i+1}. Skip."); continue
@@ -350,8 +350,26 @@ def process_image_task(image_path, output_filename_base, mode, sid):
              if mode == 'extract':
                  emit_progress(4, f"Finished extract ({processed_count}/{bubble_count}).", 95, sid); final_image_np = inpainted_image; output_filename = f"{output_filename_base}_cleaned.jpg"; result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': translations_list}
              elif mode == 'auto':
-                 emit_progress(4, f"Finished drawing ({processed_count}/{bubble_count}).", 95, sid); final_image_np = inpainted_image # Default
-                 if image_pil: try: final_image_np = cv2.cvtColor(np.array(image_pil.convert('RGB')), cv2.COLOR_RGB2BGR); except Exception as conv_e: print(f"❌ PIL->CV2 err: {conv_e}")
+                 emit_progress(4, f"Finished drawing ({processed_count}/{bubble_count}).", 95, sid)
+                 # --- CORRECTED Final Image Conversion Block ---
+                 final_image_np = inpainted_image # Default to cleaned image
+                 if image_pil: # Check if PIL image was created (only in auto mode if successful)
+                     print("   Converting final PIL image back to OpenCV format...")
+                     try:
+                         # Convert PIL(RGBA) -> PIL(RGB) -> NumPy Array -> OpenCV(BGR)
+                         converted_np = cv2.cvtColor(np.array(image_pil.convert('RGB')), cv2.COLOR_RGB2BGR)
+                         if converted_np is not None: # Check conversion result
+                              final_image_np = converted_np # Use converted image if successful
+                              print("   ✔️ PIL -> OpenCV conversion successful.")
+                         else:
+                              print("   ⚠️ PIL -> OpenCV conversion resulted in None. Using cleaned image.")
+                     except Exception as conv_e:
+                         print(f"   ❌ Error converting PIL to OpenCV: {conv_e}. Using cleaned image.")
+                         # Keep final_image_np as the default (inpainted_image)
+                 else:
+                      print("   Skipping PIL->OpenCV conversion (PIL image not available). Using cleaned image.")
+                 # --- End Corrected Conversion Block ---
+
                  output_filename = f"{output_filename_base}_translated.jpg"; result_data = {'mode': 'auto', 'imageUrl': f'/results/{output_filename}'}
              final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
 
@@ -380,7 +398,9 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         print(f"❌❌❌ Unhandled error task SID {sid}: {e}"); traceback.print_exc(); emit_error(f"Unexpected server error ({type(e).__name__}).", sid)
     finally: # Cleanup Uploaded File
         try:
-            if 'image_path' in locals() and image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
+            # Check if image_path was defined in the task scope before trying to use it
+            if 'image_path' in locals() and image_path and os.path.exists(image_path):
+                 os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
         except Exception as cleanup_err: print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
 
 
@@ -401,6 +421,7 @@ def handle_disconnect(): print(f"❌ Client disconnected: {request.sid}")
 
 @socketio.on('start_processing')
 def handle_start_processing(data):
+    # --- Robust handler from previous step ---
     sid = request.sid; print(f"\n--- Received 'start_processing' from SID: {sid} ---")
     if not isinstance(data, dict): emit_error("Invalid request format.", sid); return
     print(f"   Data keys: {list(data.keys())}")
@@ -423,7 +444,7 @@ def handle_start_processing(data):
         print(f"   Attempting task start...")
         try: socketio.start_background_task(process_image_task, upload_path, output_filename_base, mode, sid); print(f"   ✔️ Task initiated."); socketio.emit('processing_started', {'message': 'Upload OK! Processing...'}, room=sid)
         except Exception as task_err: print(f"❌ Failed start task: {task_err}"); traceback.print_exc(); emit_error(f"Server error starting task: {task_err}", sid);
-            # Corrected cleanup block (from previous fix)
+            # Corrected cleanup block
             print(f"   Attempting cleanup for failed task start: {upload_path}")
             if os.path.exists(upload_path):
                 try: os.remove(upload_path); print(f"   🧹 Cleaned up file due to task start failure: {upload_path}")
@@ -437,4 +458,5 @@ if __name__ == '__main__':
     if not ROBOFLOW_API_KEY: print("⚠️ WARNING: ROBOFLOW_API_KEY not set!")
     if app.config['SECRET_KEY'] == 'change_this_in_production_!!!': print("⚠️ WARNING: Using default FLASK_SECRET_KEY!")
     port = int(os.environ.get('PORT', 9000))
+    print(f"   * Environment: {os.environ.get('FLASK_ENV', 'production')}")
     print(f"   * Ready on http://0.0.0.0:{port}"); socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
