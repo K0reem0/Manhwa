@@ -157,7 +157,6 @@ def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
                 print(f"   ⚠️ LuminAI Rate limit (429). Retrying in {retry_after}s...")
                 if sid: emit_progress(-1, f"Translation service busy. Retrying ({attempt+1}/{max_retries})...", -1, sid) # Inform user
                 socketio.sleep(retry_after) # Use socketio.sleep for async compatibility
-            # --- CORRECTED ELSE BLOCK ---
             else:
                 # Other HTTP errors (e.g., 500 Internal Server Error) - don't retry these by default
                 print(f"   ❌ LuminAI failed: Status {response.status_code} - {response.text[:150]}")
@@ -166,7 +165,6 @@ def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
                     emit_error(f"Translation service failed (Status {response.status_code}).", sid)
                 # Stop retrying on non-429 errors and return empty string
                 return ""
-            # --- END CORRECTION ---
 
         except RequestException as e:
             # Network errors (timeout, connection error, etc.)
@@ -395,24 +393,64 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         # === Step 5: Save Final Image ===
         if final_image_np is not None and final_output_path:
             emit_progress(5, "Saving final image...", 98, sid); save_success = False
-            try: save_success = cv2.imwrite(final_output_path, final_image_np); print(f"✔️ Saved (OpenCV): {final_output_path}")
+            try:
+                 save_success = cv2.imwrite(final_output_path, final_image_np)
+                 if not save_success: # More specific error check
+                      raise IOError(f"cv2.imwrite returned False for path: {final_output_path}")
+                 print(f"✔️ Saved final image (OpenCV): {final_output_path}")
             except Exception as cv_save_err:
                  print(f"⚠️ OpenCV save failed: {cv_save_err}. Trying PIL...");
-                 try: pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB)); os.makedirs(os.path.dirname(final_output_path), exist_ok=True); pil_img_to_save.save(final_output_path); save_success = True; print(f"✔️ Saved (PIL): {final_output_path}")
-                 except Exception as pil_save_err: print(f"❌ PIL save failed: {pil_save_err}"); emit_error("Failed save final image.", sid)
+                 try:
+                      pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB))
+                      os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
+                      pil_img_to_save.save(final_output_path)
+                      save_success = True
+                      print(f"✔️ Saved final image (PIL): {final_output_path}")
+                 except Exception as pil_save_err:
+                      print(f"❌ PIL save also failed: {pil_save_err}")
+                      emit_error("Failed save final image.", sid)
+
             # === Step 6: Signal Completion ===
             if save_success:
-                processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s. Output: {final_output_path}"); emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
-                if not result_data: print("⚠️ Result data empty."); result_data = {'mode': mode, 'imageUrl': f'/results/{os.path.basename(final_output_path)}'}; if mode == 'extract': result_data['translations'] = translations_list
-                socketio.emit('processing_complete', result_data, room=sid)
-            else: print(f"❌❌❌ Critical Error: Could not save image {sid}")
-        elif not final_output_path: print(f"❌ SID {sid}: Aborted before output path set.")
-        else: print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
-    except Exception as e: print(f"❌❌❌ UNHANDLED FATAL ERROR task {sid}: {e}"); traceback.print_exc(); emit_error(f"Unexpected server error ({type(e).__name__}).", sid)
+                processing_time = time.time() - start_time
+                print(f"✔️ SID {sid} Complete {processing_time:.2f}s. Output: {final_output_path}")
+                emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
+                # --- CORRECTED BLOCK ---
+                # Ensure result_data has been populated
+                if not result_data:
+                    print("⚠️ Result data empty before emit. Creating default.")
+                    # Create a default result dictionary
+                    result_data = {
+                        'mode': mode,
+                        'imageUrl': f'/results/{os.path.basename(final_output_path)}'
+                    }
+                    # If the mode ended up being 'extract', add the translations list
+                    if mode == 'extract':
+                        result_data['translations'] = translations_list
+                # --- END CORRECTION ---
+                socketio.emit('processing_complete', result_data, room=sid) # Send results
+            else:
+                 print(f"❌❌❌ Critical Error: Could not save image {sid} to {final_output_path}")
+                 # Error should have been emitted by save block if PIL failed
+        elif not final_output_path:
+             print(f"❌ SID {sid}: Aborted before output path set.")
+             # Error should have been emitted previously
+        else: # final_image_np is None
+             print(f"❌ SID {sid}: No final image data.");
+             emit_error("Internal error: No final image generated.", sid)
+
+    except Exception as e:
+         print(f"❌❌❌ UNHANDLED FATAL ERROR task {sid}: {e}")
+         traceback.print_exc()
+         emit_error(f"Unexpected server error ({type(e).__name__}).", sid)
     finally:
+        # Cleanup Uploaded File
         try:
-            if image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
-        except Exception as cleanup_err: print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
+            if image_path and os.path.exists(image_path):
+                 os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
+        except Exception as cleanup_err:
+             print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
+
 
 # --- Flask Routes & SocketIO Handlers ---
 @app.route('/')
