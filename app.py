@@ -9,10 +9,8 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 from requests.exceptions import RequestException
 import re
-# --- CORRECTED IMPORT ---
 from shapely.geometry import Polygon, MultiPolygon # Added MultiPolygon
 from shapely.validation import make_valid
-# --- END CORRECTION ---
 import uuid
 from flask import Flask, request, render_template, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -132,33 +130,71 @@ def extract_translation(text):
     else: return text.strip().strip('"\'').strip()
 
 def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
+    """Sends request to LuminAI, handles retries, and extracts translation."""
     print("ℹ️ Calling LuminAI...")
-    url = "https://luminai.my.id/"
+    url = "https://luminai.my.id/" # Make sure this is the correct endpoint
     payload = {"content": prompt, "imageBuffer": list(image_bytes), "options": {"clean_output": True}}
     headers = {"Content-Type": "application/json", "Accept-Language": "ar"}
-    timeout_seconds = 45
+    timeout_seconds = 45 # Increased timeout
+
     for attempt in range(max_retries):
         print(f"   LuminAI Attempt {attempt + 1}/{max_retries}...")
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=timeout_seconds)
+
             if response.status_code == 200:
-                result_text = response.json().get("result", ""); translation = extract_translation(result_text)
-                if translation: print(f"✔️ LuminAI translation received: '{translation[:50]}...'"); return translation
-                else: print(f"   ⚠️ LuminAI success but no text extracted."); return ""
+                result_text = response.json().get("result", "")
+                translation = extract_translation(result_text)
+                if translation:
+                    print(f"✔️ LuminAI translation received: '{translation[:50]}...'")
+                    return translation
+                else:
+                    print(f"   ⚠️ LuminAI success but no text extracted from: '{result_text[:100]}...'")
+                    return "" # Return empty if extraction fails even on success
             elif response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', 5)); print(f"   ⚠️ LuminAI Rate limit (429). Retrying in {retry_after}s...")
-                if sid: emit_progress(-1, f"Translation busy. Retrying ({attempt+1}/{max_retries})...", -1, sid)
-                socketio.sleep(retry_after)
-            else: print(f"   ❌ LuminAI failed: Status {response.status_code} - {response.text[:150]}"); if sid: emit_error(f"Translation failed (Status {response.status_code}).", sid); return ""
+                # Rate limited
+                retry_after = int(response.headers.get('Retry-After', 5)) # Use Retry-After header if available
+                print(f"   ⚠️ LuminAI Rate limit (429). Retrying in {retry_after}s...")
+                if sid: emit_progress(-1, f"Translation service busy. Retrying ({attempt+1}/{max_retries})...", -1, sid) # Inform user
+                socketio.sleep(retry_after) # Use socketio.sleep for async compatibility
+            # --- CORRECTED ELSE BLOCK ---
+            else:
+                # Other HTTP errors (e.g., 500 Internal Server Error) - don't retry these by default
+                print(f"   ❌ LuminAI failed: Status {response.status_code} - {response.text[:150]}")
+                # Check if sid exists before emitting error
+                if sid:
+                    emit_error(f"Translation service failed (Status {response.status_code}).", sid)
+                # Stop retrying on non-429 errors and return empty string
+                return ""
+            # --- END CORRECTION ---
+
         except RequestException as e:
+            # Network errors (timeout, connection error, etc.)
             print(f"   ❌ Network/Timeout error LuminAI (Attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1: wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time)
-            else: print("   ❌ LuminAI failed after max retries (network)."); if sid: emit_error("Translation connection failed.", sid); return ""
+            if attempt < max_retries - 1:
+                wait_time = 2 * (attempt + 1) # Exponential backoff
+                print(f"      Retrying in {wait_time}s...")
+                socketio.sleep(wait_time)
+            else:
+                print("   ❌ LuminAI failed after max retries (network).")
+                if sid: emit_error("Translation service connection failed.", sid)
+                return "" # Failed after all retries
         except Exception as e:
-            print(f"   ❌ Unexpected error LuminAI (Attempt {attempt+1}): {e}"); traceback.print_exc(limit=1)
-            if attempt < max_retries - 1: socketio.sleep(2)
-            else: print("   ❌ LuminAI failed after max retries (unexpected)."); if sid: emit_error("Unexpected translation error.", sid); return ""
-    print("   ❌ LuminAI failed after all retries."); if sid: emit_error("Translation unavailable after retries.", sid); return ""
+            # Unexpected errors (e.g., JSON decoding error, etc.)
+            print(f"   ❌ Unexpected error LuminAI (Attempt {attempt+1}): {e}")
+            traceback.print_exc(limit=1)
+            if attempt < max_retries - 1:
+                socketio.sleep(2) # Short wait before retry on unexpected error
+            else:
+                print("   ❌ LuminAI failed after max retries (unexpected).")
+                if sid: emit_error("Unexpected error during translation.", sid)
+                return "" # Failed after all retries
+
+    # Should only be reached if all retries failed (e.g., due to 429s or network errors)
+    print("   ❌ LuminAI failed after all retries.")
+    if sid: emit_error("Translation service unavailable after multiple retries.", sid)
+    return ""
+
 
 def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     print("ℹ️ Finding optimal text settings...")
