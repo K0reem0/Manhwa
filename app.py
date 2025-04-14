@@ -24,7 +24,7 @@ eventlet.monkey_patch()
 class DummyTextFormatter:
     def __init__(self): print("⚠️ WARNING: Initializing DummyTextFormatter.")
     def set_arabic_font_path(self, path): pass
-    def get_font(self, size): return None # Critical: Dummy returns None
+    def get_font(self, size): return None
     def format_arabic_text(self, text): return text
     def layout_balanced_text(self, draw, text, font, target_width): return text
 
@@ -40,7 +40,6 @@ except ImportError as import_err:
     print("⚠️ WARNING: Using dummy 'text_formatter'.")
 
 load_dotenv()
-
 # --- Configuration ---
 UPLOAD_FOLDER = 'uploads'; RESULT_FOLDER = 'results'; ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
@@ -120,7 +119,6 @@ def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
             response = requests.post(url, json=payload, headers=headers, timeout=timeout_seconds)
             if response.status_code == 200:
                 result_text = response.json().get("result", ""); translation = extract_translation(result_text.strip())
-                # Return translation even if empty (matches original behavior slightly better than webapp version)
                 print(f"✔️ LuminAI translation received: '{translation[:50]}...'")
                 return translation
             elif response.status_code == 429:
@@ -132,23 +130,19 @@ def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
                 return "" # Stop retrying other errors
         except RequestException as e:
             print(f"❌ Network error LuminAI (Attempt {attempt+1}): {e}")
-            # --- CORRECTED SYNTAX/LOGIC FOR LAST ATTEMPT ---
             if attempt == max_retries - 1:
                 print("   ❌ LuminAI failed after max retries (network).")
                 if sid: emit_error("Translation connection failed.", sid)
-                return "" # Failed after all retries
+                return ""
             else:
-                # Wait and retry if not the last attempt
                 wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time)
-            # --- END CORRECTION ---
         except Exception as e:
             print(f"❌ Unexpected error LuminAI (Attempt {attempt+1}): {e}"); traceback.print_exc(limit=1)
             if attempt == max_retries - 1:
                  print("   ❌ LuminAI failed after max retries (unexpected).")
                  if sid: emit_error("Unexpected translation error.", sid); return ""
             else:
-                 socketio.sleep(2) # Short wait on unexpected before retry
-    # If loop finishes (e.g. only 429s occurred)
+                 socketio.sleep(2)
     print("   ❌ LuminAI failed after all retries.");
     if sid: emit_error("Translation unavailable.", sid); return ""
 
@@ -156,7 +150,7 @@ def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     print("ℹ️ Finding optimal text settings...")
     if not initial_shrunk_polygon or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   ⚠️ Invalid polygon."); return None
     if not text: print("   ⚠️ Empty text."); return None
-    if isinstance(text_formatter, DummyTextFormatter): print("   ⚠️ Cannot find settings: DummyFormatter active."); return None # Keep check
+    if isinstance(text_formatter, DummyTextFormatter): print("   ⚠️ Cannot find settings: DummyFormatter active."); return None
 
     best_fit = None
     for font_size in range(65, 4, -1):
@@ -205,7 +199,6 @@ def draw_text_on_layer(text_settings, image_size):
         print(f"   ✔️ Drew text '{text_to_draw[:20]}...' at ({x},{y}) size {font_size}"); return text_layer
     except Exception as e: print(f"❌ Error in draw_text_on_layer: {e}"); traceback.print_exc(limit=1); return Image.new('RGBA', image_size, (0, 0, 0, 0))
 
-
 # --- Main Processing Task (Reverted Logic where requested) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
     """ Core logic: Uses original script's geometry validation & text handling. """
@@ -222,14 +215,14 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         elif image.shape[2] != 3: raise ValueError(f"Unsupported channels: {image.shape[2]}.")
         h_img, w_img = image.shape[:2];
         if h_img == 0 or w_img == 0: raise ValueError("Image zero dimensions.")
-        result_image = image.copy(); text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        result_image = image.copy(); text_mask = np.zeros(image.shape[:2], dtype=np.uint8) # Init like original
 
         # === Step 1: Remove Text ===
         emit_progress(1, "Detecting text...", 10, sid);
-        retval, buffer_text = cv2.imencode('.jpg', image);
+        retval, buffer_text = cv2.imencode('.jpg', image); # Use original 'image'
         if not retval or buffer_text is None: raise ValueError("Failed encode text detect.")
         b64_image_text = base64.b64encode(buffer_text).decode('utf-8'); text_predictions = []
-        try: # Original style try/except
+        try:
             print(f"   Sending request to Roboflow text detection...")
             text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_DETECT_URL, ROBOFLOW_API_KEY, b64_image_text)
             print(f"   Found {len(text_predictions)} potential text areas.")
@@ -240,22 +233,23 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                      polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
                      polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1); polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
                      try: cv2.fillPoly(text_mask, [polygon_np], 255); polygons_drawn += 1
-                     except Exception as fill_err: print(f"⚠️ Warn: Error drawing text polygon: {fill_err}") # Keep log
+                     except Exception as fill_err: print(f"⚠️ Warn: Error drawing text polygon: {fill_err}")
             print(f"   Created text mask with {polygons_drawn} polygons.")
             if np.any(text_mask):
                  print(f"   Inpainting detected text areas...")
-                 inpainted_image_cv = cv2.inpaint(image, text_mask, 10, cv2.INPAINT_NS)
+                 inpainted_image_cv = cv2.inpaint(image, text_mask, 10, cv2.INPAINT_NS) # Inpaint original
                  if inpainted_image_cv is None: raise RuntimeError("cv2.inpaint returned None")
-                 result_image = inpainted_image_cv; print(f"   Inpainting complete.")
+                 result_image = inpainted_image_cv # Update result_image
+                 print(f"   Inpainting complete.")
             else: print(f"   No text detected, skipping inpainting.")
         except (ValueError, ConnectionError, RuntimeError, requests.exceptions.RequestException) as rf_err: print(f"❌ Error during Roboflow text detection: {rf_err}. Skipping text removal."); emit_error("Text detection failed.", sid)
         except Exception as e: print(f"❌ Error during text detection/inpainting: {e}. Skipping text removal."); emit_error("Text processing error.", sid)
 
         # === Step 2: Detect Bubbles ===
-        emit_progress(2, "Detecting bubbles...", 30, sid); b64_bubble = b64_image_text
+        emit_progress(2, "Detecting bubbles...", 30, sid); b64_bubble = b64_image_text # Use same b64 as original
         if not b64_bubble: raise ValueError("Missing base64 data for bubble detection.")
         bubble_predictions = []
-        try: # Original style try/except
+        try:
             print(f"   Sending request to Roboflow bubble detection...")
             bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_DETECT_URL, ROBOFLOW_API_KEY, b64_bubble)
             print(f"   Found {len(bubble_predictions)} speech bubbles.")
@@ -269,13 +263,15 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         # --- Bubble Processing Loop (Original Logic) ---
         elif bubble_predictions and not final_output_path:
              emit_progress(2, f"Processing {len(bubble_predictions)} bubbles...", 40, sid)
-             image_pil = None # Define before try
-             try: image_pil = Image.fromarray(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)).convert('RGBA')
+             image_pil = None
+             try: image_pil = Image.fromarray(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)).convert('RGBA') # Convert cleaned image
              except Exception as pil_conv_err: print(f"❌ Error converting to PIL: {pil_conv_err}"); emit_error("Cannot draw (PIL error).", sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned_pil_error.jpg"; final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
 
-             if image_pil:
+             if image_pil: # Only proceed if PIL conversion worked
                  temp_draw_for_settings = ImageDraw.Draw(Image.new('RGBA', (1, 1))); image_size = image_pil.size
                  bubble_count = len(bubble_predictions); processed_count = 0; base_progress = 45; max_progress_bubbles = 90
+                 original_image_for_cropping = image.copy() # Keep a copy of the *original* for cropping context
+
                  for i, pred in enumerate(bubble_predictions):
                      try: # Original style try/except per bubble
                           current_bubble_progress = base_progress + int(((i + 1) / bubble_count) * (max_progress_bubbles - base_progress))
@@ -302,7 +298,9 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                           minx_orig, miny_orig, maxx_orig, maxy_orig = map(int, original_polygon.bounds)
                           minx_orig, miny_orig = max(0, minx_orig), max(0, miny_orig); maxx_orig, maxy_orig = min(w_img, maxx_orig), min(h_img, maxy_orig)
                           if maxx_orig <= minx_orig or maxy_orig <= miny_orig: print("   Skipping bubble: Invalid crop."); continue
-                          bubble_crop = image[miny_orig:maxy_orig, minx_orig:maxx_orig] # Crop original 'image'
+
+                          # Crop from the copy of original image
+                          bubble_crop = original_image_for_cropping[miny_orig:maxy_orig, minx_orig:maxx_orig]
                           if bubble_crop.size == 0: print("   Skipping bubble: Crop empty."); continue
                           _, crop_buffer = cv2.imencode('.jpg', bubble_crop);
                           if crop_buffer is None: print("   Skipping bubble: Failed encode crop."); continue
@@ -311,10 +309,9 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                           print("   Requesting translation from LuminAI...")
                           translation_prompt_orig = 'ترجم نص المانجا هذا إلى اللغة العربية بحيث تكون الترجمة مفهومة وتوصل المعنى الى القارئ. أرجو إرجاع الترجمة فقط بين علامتي اقتباس مثل "النص المترجم". مع مراعاة النبرة والانفعالات الظاهرة في كل سطر (مثل: الصراخ، التردد، الهمس) وأن تُترجم بطريقة تُحافظ على الإيقاع المناسب للفقاعة.'
                           translation = ask_luminai(translation_prompt_orig, crop_bytes, sid=sid) # Use original prompt
-                          if not translation: print("   Skipping bubble: Translation failed."); continue # Skip if empty like original
+                          if not translation: print("   Skipping bubble: Translation failed or empty."); continue # Skip if empty like original
                           print(f"   Translation received: '{translation}'")
 
-                          # --- Process based on mode ---
                           if mode == 'extract': translations_list.append({'id': i + 1, 'translation': translation}); processed_count += 1
                           elif mode == 'auto':
                               # === NO Dummy Check ===
@@ -324,8 +321,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                                    shrunk = original_polygon.buffer(-initial_buffer_distance, join_style=2)
                                    if not shrunk.is_valid or shrunk.is_empty: shrunk_fallback = original_polygon.buffer(-3.0, join_style=2); initial_shrunk_polygon = shrunk_fallback
                                    else: initial_shrunk_polygon = shrunk
-                                   if not initial_shrunk_polygon.is_valid or initial_shrunk_polygon.is_empty or initial_shrunk_polygon.geom_type != 'Polygon':
-                                        print("   Warning: Shrunk polygon invalid. Using original."); initial_shrunk_polygon = original_polygon
+                                   if not initial_shrunk_polygon.is_valid or initial_shrunk_polygon.is_empty or initial_shrunk_polygon.geom_type != 'Polygon': print("   Warning: Shrunk polygon invalid. Using original."); initial_shrunk_polygon = original_polygon
                               except Exception as initial_buffer_err: print(f"   Warning: Error shrinking: {initial_buffer_err}. Using original."); initial_shrunk_polygon = original_polygon
                               if not isinstance(initial_shrunk_polygon, Polygon) or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   Skipping bubble: Final polygon invalid."); continue
 
@@ -338,12 +334,10 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                                    print(f"   Optimal settings found: Size {text_settings['font_size']}, Pos ({text_settings['x']}, {text_settings['y']})")
                                    print("   Drawing text layer...")
                                    text_layer = draw_text_on_layer(text_settings, image_size)
-                                   if text_layer:
-                                        print("   Compositing text layer...")
-                                        image_pil.paste(text_layer, (0, 0), text_layer); processed_count += 1
+                                   if text_layer: print("   Compositing text layer..."); image_pil.paste(text_layer, (0, 0), text_layer); processed_count += 1
                                    else: print("   Skipping bubble: draw_text_on_layer failed.")
                               else: print("   Skipping bubble: Could not fit text.")
-                     except Exception as bubble_proc_err: print(f"❌ Error processing bubble {i + 1}: {bubble_proc_err}"); traceback.print_exc(); emit_progress(3, f"Skipping bubble {i+1} (error).", current_bubble_progress, sid); continue # Original script continued
+                     except Exception as bubble_proc_err: print(f"❌ Error processing bubble {i + 1}: {bubble_proc_err}"); traceback.print_exc(); emit_progress(3, f"Skipping bubble {i+1} (error).", current_bubble_progress, sid); continue
 
                  # --- Finalize after loop ---
                  if mode == 'extract': emit_progress(4, f"Finished extracting ({processed_count}/{bubble_count}).", 95, sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned.jpg"; result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': translations_list}
@@ -356,7 +350,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         # === Step 5 & 6: Save and Complete ===
         if final_image_np is not None and final_output_path:
             emit_progress(5, "Saving final image...", 98, sid); save_success = False
-            try: # Keep robust save
+            try:
                  save_success = cv2.imwrite(final_output_path, final_image_np);
                  if not save_success: raise IOError(f"cv2.imwrite failed: {final_output_path}")
                  print(f"✔️ Saved (OpenCV): {final_output_path}")
@@ -365,16 +359,25 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                  try: pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB)); os.makedirs(os.path.dirname(final_output_path), exist_ok=True); pil_img_to_save.save(final_output_path); save_success = True; print(f"✔️ Saved (PIL): {final_output_path}")
                  except Exception as pil_save_err: print(f"❌ PIL save failed: {pil_save_err}"); emit_error("Failed save final image.", sid)
 
-            if save_success: # Keep webapp emit logic
+            if save_success:
                 processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s."); emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
-                if not result_data: print("⚠️ Result data empty. Creating default."); result_data = {'mode': mode, 'imageUrl': f'/results/{os.path.basename(final_output_path)}'}; if mode == 'extract': result_data['translations'] = translations_list
+                # --- CORRECTED BLOCK ---
+                if not result_data:
+                    print("⚠️ Result data empty. Creating default.")
+                    result_data = {
+                        'mode': mode,
+                        'imageUrl': f'/results/{os.path.basename(final_output_path)}'
+                    }
+                    if mode == 'extract':
+                        result_data['translations'] = translations_list
+                # --- END CORRECTION ---
                 socketio.emit('processing_complete', result_data, room=sid)
             else: print(f"❌❌❌ Critical Error: Could not save image {sid}")
         elif not final_output_path: print(f"❌ SID {sid}: Aborted before output path set.")
         else: print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
 
     except Exception as e: print(f"❌❌❌ UNHANDLED FATAL ERROR task {sid}: {e}"); traceback.print_exc(); emit_error(f"Unexpected server error ({type(e).__name__}).", sid)
-    finally: # Keep webapp cleanup
+    finally:
         try:
             if image_path and os.path.exists(image_path): os.remove(image_path); print(f"🧹 Cleaned up: {image_path}")
         except Exception as cleanup_err: print(f"⚠️ Error cleaning up {image_path}: {cleanup_err}")
@@ -451,4 +454,3 @@ if __name__ == '__main__':
     print(f"   * Starting server http://0.0.0.0:{port}")
     try: socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
     except Exception as run_err: print(f"❌❌❌ Failed start server: {run_err}"); sys.exit(1)
-
