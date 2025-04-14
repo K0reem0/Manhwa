@@ -921,7 +921,6 @@ def handle_start_processing(data):
     except IOError as io_err:
          print(f"❌ File writing error: {io_err}")
          emit_error('Server error saving uploaded file.', sid)
-         # --- THIS IS THE SECOND CORRECTED BLOCK ---
          # Clean up partially saved file if it exists
          if upload_path and os.path.exists(upload_path):
              try:
@@ -930,7 +929,6 @@ def handle_start_processing(data):
              except Exception as cleanup_err_io:
                  # Log error during cleanup but continue to return
                  print(f"   ⚠️ Error cleaning up file '{upload_path}' after IO error: {cleanup_err_io}")
-         # --- END OF SECOND CORRECTION ---
          return # Important: return after handling the IO error
     except Exception as e:
         print(f"❌ Unexpected file handling error: {e}")
@@ -949,14 +947,16 @@ def handle_start_processing(data):
     if upload_path: # Only proceed if file was saved successfully
         print(f"   Attempting to start background processing task...")
         try:
-            # Pass necessary arguments to the task function
+            # --- THIS IS THE CORRECTED CALL (using positional arguments) ---
             socketio.start_background_task(
                 process_image_task,
-                upload_path=upload_path,
-                output_filename_base=output_filename_base,
-                mode=mode,
-                sid=sid
+                upload_path,            # 1st argument corresponds to 'image_path'
+                output_filename_base,   # 2nd argument corresponds to 'output_filename_base'
+                mode,                   # 3rd argument corresponds to 'mode'
+                sid                     # 4th argument corresponds to 'sid'
             )
+            # --- END OF CORRECTION ---
+
             print(f"   ✔️ Background task for SID {sid} initiated successfully.")
             # Notify client that processing has started
             socketio.emit('processing_started', {'message': 'Upload successful! Processing has started...'}, room=sid)
@@ -966,7 +966,6 @@ def handle_start_processing(data):
             print(f"❌ CRITICAL: Failed to start background task: {task_start_err}")
             traceback.print_exc()
             emit_error(f"Server error: Could not start image processing task ({task_start_err}).", sid)
-            # --- THIS IS THE FIRST CORRECTED BLOCK (remains correct) ---
             # Attempt to clean up the uploaded file if task failed to start
             if os.path.exists(upload_path):
                 try:
@@ -974,7 +973,6 @@ def handle_start_processing(data):
                     print(f"   🧹 Cleaned up file '{upload_path}' due to task start failure.")
                 except Exception as cleanup_err_start:
                     print(f"   ⚠️ Error cleaning up file '{upload_path}' after task start failure: {cleanup_err_start}")
-            # -----------------------------------------------
 
     else:
         # This case should theoretically not be reached if error handling above is correct
