@@ -145,7 +145,7 @@ def extract_translation(text):
 
 def ask_luminai(prompt, image_bytes, max_retries=3, sid=None):
     print("ℹ️ Calling LuminAI...")
-    url = "https://luminai.my.id/"; payload = {"content": prompt, "imageBuffer": list(image_bytes), "options": {"clean_output": True}}
+    url = "https://ai.siputzx.my.id/"; payload = {"content": prompt, "imageBuffer": list(image_bytes), "options": {"clean_output": True}}
     headers = {"Content-Type": "application/json", "Accept-Language": "ar"}; timeout_seconds = 60 # Increased timeout slightly
     for attempt in range(max_retries):
         print(f"   LuminAI Attempt {attempt + 1}/{max_retries}...")
