@@ -188,7 +188,7 @@ def ask_gemini_translation(prompt, image_bytes, max_retries=3, sid=None):
 
     contents = [
         {"text": prompt},
-        {"inlineData": gemini_image_data}
+        {"inline_data": gemini_image_data}
     ]
 
     for attempt in range(max_retries):
