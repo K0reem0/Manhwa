@@ -105,8 +105,7 @@ setup_font()
 # --- Constants ---
 TEXT_COLOR = (0, 0, 0); SHADOW_COLOR = (255, 255, 255); SHADOW_OPACITY = 90
 # Removed the old LuminAI prompt
-TRANSLATION_PROMPT_GEMINI = 'Translate the following manga text into Arabic clearly and naturally, preserving the tone and emotion. Return ONLY the translated text enclosed in double quotes, like this: "Your translated text here". Ensure the Arabic flows well for a reader.'
-
+TRANSLATION_PROMPT_GEMINI = 'ترجم هذا النص داخل فقاعة المانجا إلى العربية بوضوح. أرجع الترجمة فقط بين علامتي اقتباس هكذا: "الترجمة هنا".'
 
 # --- Initialize Google GenAI ---
 model = None # Initialize model globally to be set after API key check
