@@ -10,4 +10,6 @@ shapely
 eventlet
 python-dotenv
 gunicorn
+google-generativeai
+
 # أضف أي مكتبات أخرى يستخدمها text_formatter.py إذا لم تكن مدرجة
