@@ -21,6 +21,8 @@ from werkzeug.utils import secure_filename
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import io
+import zipfile
+import shutil
 
 eventlet.monkey_patch()
 
@@ -48,15 +50,16 @@ load_dotenv()
 UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+ALLOWED_ARCHIVES = {'zip'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY') # <-- Add this line to get your Gemini API key
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 # --- Flask App Setup ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'change_this_in_production')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['RESULT_FOLDER'] = RESULT_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 16 MB limit
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024 # Increased limit for zip files (50 MB)
 
 # --- SocketIO Setup ---
 socketio = SocketIO(
@@ -95,6 +98,9 @@ def setup_font():
             print("⚠️ Font 'fonts/66Hayah.otf' not found. Using default.")
             try: text_formatter.set_arabic_font_path(None)
             except AttributeError: print("   (Formatter missing method? Skipping.)")
+        # In a real app, you might want to create a default font if it's missing
+        # if not font_path_to_set and os.path.exists("default_font.ttf"):
+        #     text_formatter.set_arabic_font_path("default_font.ttf")
     except Exception as e:
         print(f"❌ Error finding font path: {e}. Using default.")
         try: text_formatter.set_arabic_font_path(None)
@@ -104,11 +110,10 @@ setup_font()
 
 # --- Constants ---
 TEXT_COLOR = (0, 0, 0); SHADOW_COLOR = (255, 255, 255); SHADOW_OPACITY = 90
-# Removed the old LuminAI prompt
 TRANSLATION_PROMPT_GEMINI = 'ترجم هذا النص داخل فقاعة المانجا إلى العربية بوضوح. أرجع الترجمة فقط بين علامتي اقتباس هكذا: "الترجمة هنا".'
 
 # --- Initialize Google GenAI ---
-model = None # Initialize model globally to be set after API key check
+model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
@@ -135,9 +140,11 @@ if GOOGLE_API_KEY:
 
 # --- Helper Functions ---
 def emit_progress(step, message, percentage, sid):
+    """Emits progress updates to a specific client."""
     socketio.emit('progress_update', {'step': step, 'message': message, 'percentage': percentage}, room=sid)
     socketio.sleep(0.01)
 def emit_error(message, sid):
+    """Emits an error message to a specific client."""
     print(f"SID: {sid} | ❗ ERROR Emitted: {message}")
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01)
@@ -145,6 +152,7 @@ def emit_error(message, sid):
 
 # --- Core Functions ---
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
+    """Fetches predictions from a Roboflow model."""
     model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"
     print(f"ℹ️ Calling Roboflow ({model_name})...")
     if not api_key: raise ValueError("Missing Roboflow API Key.")
@@ -159,6 +167,7 @@ def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
     except Exception as e: print(f"❌ Roboflow ({model_name}) Unexpected Error: {e}"); traceback.print_exc(limit=2); raise RuntimeError(f"Unexpected error during Roboflow ({model_name}).") from e
 
 def extract_translation(text):
+    """Extracts the quoted translation from a Gemini response."""
     if not isinstance(text, str): return ""
     match = re.search(r'"(.*?)"', text, re.DOTALL);
     if match: return match.group(1).strip()
@@ -166,6 +175,7 @@ def extract_translation(text):
 
 # --- MODIFIED: ask_gemini_translation function to use Google GenAI ---
 def ask_gemini_translation(prompt, image_bytes, max_retries=3, sid=None):
+    """Sends an image to Google Gemini for translation."""
     if not model:
         print("   ❌ Gemini model not initialized. Cannot perform translation.")
         if sid: emit_error("Translation service unavailable (Gemini not configured).", sid)
@@ -194,26 +204,21 @@ def ask_gemini_translation(prompt, image_bytes, max_retries=3, sid=None):
         print(f"   Gemini Attempt {attempt + 1}/{max_retries}...")
         try:
             response = model.generate_content(contents)
-
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 print(f"❌ Gemini response blocked: {response.prompt_feedback.block_reason}")
                 if sid: emit_error(f"Translation blocked due to content policy.", sid)
                 return ""
-
             if not response.candidates or not response.candidates[0].content.parts:
                 print(f"❌ Gemini returned no candidates or parts.")
                 if sid: emit_error("Translation service returned empty result.", sid)
                 return ""
-
             result_text = ""
             for part in response.candidates[0].content.parts:
                 if part.text:
                     result_text += part.text
-
             translation = extract_translation(result_text.strip())
             print(f"✔️ Gemini translation received: '{translation[:50]}...'")
             return translation
-
         except Exception as e:
             print(f"❌ Error calling Gemini API (Attempt {attempt+1}): {e}")
             if attempt == max_retries - 1:
@@ -222,11 +227,11 @@ def ask_gemini_translation(prompt, image_bytes, max_retries=3, sid=None):
                 return ""
             else:
                 wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time)
-
     print("   ❌ Gemini failed after all retries.")
     if sid: emit_error("Translation unavailable.", sid); return ""
 
 def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
+    """Finds the best font size and position to fit text within a polygon."""
     print("ℹ️ Finding optimal text settings...")
     if not initial_shrunk_polygon or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   ⚠️ Invalid polygon."); return None
     if not text: print("   ⚠️ Empty text."); return None
@@ -266,6 +271,7 @@ def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
     return best_fit
 
 def draw_text_on_layer(text_settings, image_size):
+    """Draws text on a transparent layer with a shadow effect."""
     print("ℹ️ Drawing text layer...")
     text_layer = Image.new('RGBA', image_size, (0, 0, 0, 0))
     if not text_settings or not isinstance(text_settings, dict): print("   ⚠️ Invalid text_settings."); return text_layer
@@ -281,11 +287,16 @@ def draw_text_on_layer(text_settings, image_size):
 
 # --- Main Processing Task ---
 def process_image_task(image_path, output_filename_base, mode, sid):
-    print(f"ℹ️ SID {sid}: Starting image processing task for {image_path}")
+    """
+    Main background task to process a single image.
+    This function is called by both single image upload and batch processing.
+    """
+    print(f"ℹ️ SID {sid}: Starting image processing task for {os.path.basename(image_path)}")
     start_time = time.time(); inpainted_image_cv = None; final_image_np = None; translations_list = []
     final_output_path = ""; result_data = {}; image = None
     ROBOFLOW_TEXT_DETECT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
     ROBOFLOW_BUBBLE_DETECT_URL = 'https://outline.roboflow.com/yolo-0kqkh/2'
+
     try:
         emit_progress(0, "Loading image...", 5, sid);
         image = cv2.imread(image_path)
@@ -436,20 +447,29 @@ def process_image_task(image_path, output_filename_base, mode, sid):
                  try: pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB)); os.makedirs(os.path.dirname(final_output_path), exist_ok=True); pil_img_to_save.save(final_output_path); save_success = True; print(f"✔️ Saved (PIL): {final_output_path}")
                  except Exception as pil_save_err: print(f"❌ PIL save failed: {pil_save_err}"); emit_error("Failed save final image.", sid)
             if save_success:
-                processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s."); emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
+                processing_time = time.time() - start_time;
+                print(f"✔️ SID {sid} Complete {processing_time:.2f}s for {os.path.basename(image_path)}.");
+                emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
                 if not result_data:
-                    print(f"⚠️ SID {sid}: Result data was empty before completion. Creating default based on mode.")
                     result_data = {'mode': mode, 'imageUrl': f'/results/{os.path.basename(final_output_path)}'}
                     if mode == 'extract': result_data['translations'] = translations_list
+                # Add the original filename to the result data
+                result_data['original_filename'] = os.path.basename(image_path)
+                result_data['is_zip_batch'] = False # Default to False for single image
                 socketio.emit('processing_complete', result_data, room=sid)
-            else: print(f"❌❌❌ SID {sid}: Critical Error: Could not save image {final_output_path}")
-        elif not final_output_path: print(f"❌ SID {sid}: Aborted before output path set.")
-        else: print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
+            else:
+                print(f"❌❌❌ SID {sid}: Critical Error: Could not save image {final_output_path}")
+        elif not final_output_path:
+            print(f"❌ SID {sid}: Aborted before output path set.")
+        else:
+            print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
+
     except Exception as e:
         print(f"❌❌❌ SID {sid}: UNHANDLED FATAL ERROR in task: {e}")
         traceback.print_exc()
         emit_error(f"Unexpected server error during processing ({type(e).__name__}).", sid)
     finally:
+        # Cleanup the uploaded file for both single and batch processing
         try:
             if image_path and os.path.exists(image_path):
                 os.remove(image_path)
@@ -472,8 +492,12 @@ def get_result_image(filename):
     except FileNotFoundError:
         return "File not found", 404
 
+# --- MODIFIED: Single file upload route ---
 @app.route('/upload', methods=['POST'])
 def handle_upload():
+    """
+    Handles single image file uploads.
+    """
     temp_log_id = f"upload_{uuid.uuid4()}"
     print(f"--- [{temp_log_id}] Received POST upload request ---")
     if 'file' not in request.files:
@@ -520,6 +544,77 @@ def handle_upload():
              except Exception: pass
         return jsonify({'error': 'Unexpected server error during upload'}), 500
 
+# --- NEW: Zip file upload route ---
+@app.route('/upload_zip', methods=['POST'])
+def handle_zip_upload():
+    """
+    Handles zip file uploads, extracts images, and prepares them for processing.
+    """
+    temp_log_id = f"upload_zip_{uuid.uuid4()}"
+    print(f"--- [{temp_log_id}] Received POST zip upload request ---")
+    if 'file' not in request.files:
+        print(f"[{temp_log_id}] ❌ Upload Error: No file part")
+        return jsonify({'error': 'No file part in the request'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        print(f"[{temp_log_id}] ❌ Upload Error: No selected file")
+        return jsonify({'error': 'No selected file'}), 400
+    if not file.filename.lower().endswith('.zip'):
+        print(f"[{temp_log_id}] ❌ Upload Error: Invalid file type. Expected .zip")
+        return jsonify({'error': 'Invalid file type. Please upload a .zip file.'}), 400
+
+    temp_dir_for_extraction = None
+    try:
+        zip_file_bytes = file.read()
+        zip_file = zipfile.ZipFile(io.BytesIO(zip_file_bytes))
+        extracted_images_info = []
+        temp_dir_for_extraction = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_zip_{uuid.uuid4()}")
+        os.makedirs(temp_dir_for_extraction, exist_ok=True)
+        print(f"[{temp_log_id}] Created temporary directory for extraction: {temp_dir_for_extraction}")
+
+        for file_info in zip_file.infolist():
+            if file_info.is_dir(): continue
+            filename = os.path.basename(file_info.filename)
+            ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+            if ext in ALLOWED_EXTENSIONS:
+                extracted_file_path = os.path.join(temp_dir_for_extraction, secure_filename(filename))
+                try:
+                    with zip_file.open(file_info) as source, open(extracted_file_path, "wb") as target:
+                        target.write(source.read())
+                    print(f"[{temp_log_id}] Extracted image: {extracted_file_path}")
+                    extracted_images_info.append({
+                        'original_filename': filename,
+                        'saved_path': extracted_file_path,
+                        'output_base': f"zip_img_{uuid.uuid4()}" # Unique base for output filenames
+                    })
+                except Exception as extract_err:
+                    print(f"[{temp_log_id}] ⚠️ Warning: Could not extract {filename}: {extract_err}")
+            else:
+                print(f"[{temp_log_id}] Skipping non-image file in zip: {filename}")
+        if not extracted_images_info:
+            print(f"[{temp_log_id}] ❌ Upload Error: No valid images found in the zip file.")
+            if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
+            return jsonify({'error': 'No valid images found in the zip file.'}), 400
+
+        print(f"[{temp_log_id}] Successfully extracted {len(extracted_images_info)} images.")
+        return jsonify({
+            'message': 'Zip file uploaded and images extracted successfully',
+            'images_to_process': extracted_images_info
+        }), 200
+    except zipfile.BadZipFile:
+        print(f"[{temp_log_id}] ❌ Upload Error: Bad zip file.")
+        if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
+        return jsonify({'error': 'The uploaded file is not a valid zip archive.'}), 400
+    except IOError as io_err:
+        print(f"[{temp_log_id}] ❌ Upload Error: File write error: {io_err}")
+        if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
+        return jsonify({'error': 'Server error saving zip file or extracted images.'}), 500
+    except Exception as e:
+        print(f"[{temp_log_id}] ❌ Upload Error: Unexpected error during zip processing: {e}")
+        traceback.print_exc()
+        if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
+        return jsonify({'error': 'Unexpected server error during zip upload processing.'}), 500
+
 # --- SocketIO Event Handlers ---
 @socketio.on('connect')
 def handle_connect():
@@ -529,8 +624,10 @@ def handle_connect():
 def handle_disconnect():
     print(f"❌ Client disconnected: {request.sid}")
 
+# --- MODIFIED: Single image processing handler ---
 @socketio.on('start_processing')
 def handle_start_processing(data):
+    """Handles the start of a single-image processing task."""
     sid = request.sid
     print(f"\n--- Received 'start_processing' event SID: {sid} ---")
     if not isinstance(data, dict):
@@ -539,21 +636,16 @@ def handle_start_processing(data):
     saved_filename = data.get('saved_filename')
     mode = data.get('mode')
     print(f"   Data received: {data}")
-    if not output_filename_base:
-        emit_error('Missing file identifier (output_filename_base).', sid); return
-    if not saved_filename:
-        emit_error('Missing saved filename.', sid); return
-    if mode not in ['extract', 'auto']:
-        emit_error(f"Invalid mode ('{mode}').", sid); return
+    if not output_filename_base or not saved_filename or mode not in ['extract', 'auto']:
+        emit_error('Missing or invalid parameters.', sid); return
     print(f"   Mode: '{mode}'")
     upload_dir = app.config['UPLOAD_FOLDER']
     upload_path = os.path.join(upload_dir, secure_filename(saved_filename))
     if not os.path.exists(upload_path) or not os.path.isfile(upload_path):
-        print(f"❌ ERROR SID {sid}: File not found at path deduced from event: {upload_path}")
-        emit_error(f"Uploaded file '{saved_filename}' not found on server. Please try uploading again.", sid)
+        print(f"❌ ERROR SID {sid}: File not found at path: {upload_path}")
+        emit_error(f"Uploaded file '{saved_filename}' not found on server.", sid)
         return
     print(f"   File confirmed exists: {upload_path}")
-    print(f"   Attempting to start background task...")
     try:
         socketio.start_background_task(
             process_image_task,
@@ -568,8 +660,53 @@ def handle_start_processing(data):
         print(f"❌ CRITICAL SID {sid}: Failed to start background task: {task_start_err}")
         traceback.print_exc()
         emit_error(f"Server error starting image processing task.", sid)
-    print(f"--- Finished handle 'start_processing' SID: {sid} ---")
 
+# --- NEW: Batch processing handler for zip files ---
+@socketio.on('start_batch_processing')
+def handle_start_batch_processing(data):
+    """
+    Handles the start of a batch-image processing task for all images from a zip file.
+    """
+    sid = request.sid
+    print(f"\n--- Received 'start_batch_processing' event SID: {sid} ---")
+    if not isinstance(data, dict):
+        emit_error("Invalid request data.", sid); return
+    images_to_process = data.get('images_to_process', [])
+    mode = data.get('mode')
+    if not isinstance(images_to_process, list) or not images_to_process or mode not in ['extract', 'auto']:
+        emit_error('Invalid or empty image list for batch processing.', sid); return
+
+    print(f"   Initiating batch processing for {len(images_to_process)} images.")
+    socketio.emit('batch_started', {'total_images': len(images_to_process)}, room=sid)
+
+    for img_info in images_to_process:
+        try:
+            image_path = img_info.get('saved_path')
+            output_base = img_info.get('output_base')
+            original_filename = img_info.get('original_filename', 'unknown')
+            if not image_path or not output_base:
+                print(f"   ⚠️ Skipping image {original_filename}: missing path or output base.")
+                emit_error(f"Skipping image '{original_filename}' due to missing data.", sid)
+                continue
+            if not os.path.exists(image_path) or not os.path.isfile(image_path):
+                print(f"❌ ERROR SID {sid}: Image file not found: {image_path}")
+                emit_error(f"Image '{original_filename}' not found on server. Skipping.", sid)
+                continue
+
+            # Start a separate background task for each image
+            socketio.start_background_task(
+                process_image_task,
+                image_path=image_path,
+                output_filename_base=output_base,
+                mode=mode,
+                sid=sid
+            )
+            print(f"   ✔️ Task initiated for image '{original_filename}'.")
+        except Exception as e:
+            print(f"❌ CRITICAL SID {sid}: Failed to start task for an image: {e}")
+            traceback.print_exc()
+            emit_error("Server error starting processing for one or more images.", sid)
+            
 # --- Main Execution ---
 if __name__ == '__main__':
     print("--- Starting Manga Processor Web App (Flask + SocketIO + Eventlet) ---")
