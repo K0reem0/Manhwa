@@ -27,7 +27,8 @@ UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-# تم إزالة MAX_SPLIT_HEIGHT هنا
+MAX_SPLIT_HEIGHT = 15000  # الارتفاع الأقصى قبل التقسيم
+SPLIT_OVERLAP = 50       # التداخل بين الأجزاء لضمان عدم فقدان الفقاعات على الحافة
 
 # --- تحديث نقطة نهاية Roboflow ---
 ROBOFLOW_SPEECH_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
@@ -75,21 +76,72 @@ def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
         print(f"❌ Roboflow Error: {e}")
         raise ValueError(f"فشل الاتصال بنموذج Roboflow. تأكد من صحة المفتاح والرابط. الخطأ: {str(e)}")
 
-def is_background_white(image, polygon_pts, threshold=180):
-    """Checks if the area inside the polygon is mostly white/bright."""
+def is_background_white(image, polygon_pts, threshold=220):
+    """
+    Checks if the area inside the polygon is mostly white/bright.
+    تم رفع العتبة (threshold) إلى 220 لتقليل احتمالية تبييض الحدود السوداء الداكنة.
+    """
     try:
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        # ملء المضلع في القناع
         cv2.fillPoly(mask, [polygon_pts], 255)
+        
+        # استخراج متوسط قيمة اللون الرمادي داخل المضلع
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         mean_val = cv2.mean(gray, mask=mask)[0]
-        # نرفع العتبة قليلاً إلى 200 لضمان تبييض الخلفيات البيضاء بوضوح
-        return mean_val > 200 
+        
+        # إذا كان متوسط القيمة أعلى من العتبة (220) نعتبرها بيضاء
+        return mean_val > threshold
     except Exception as e:
+        # إذا حدث خطأ في الحساب، نفترض أنها ليست بيضاء لتجنب التبييض الخاطئ
         return False
 
-# --- Main Processing Task (بدون تقسيم) ---
+def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
+    """
+    دالة مساعدة لمعالجة جزء واحد من الصورة (Detection + Whitening)
+    """
+    result_chunk = image_chunk.copy()
+    h_img, w_img = image_chunk.shape[:2]
+    
+    # Encode chunk
+    # نستخدم PNG هنا لترميز الجزء (Chunk) إلى base64 لـ Roboflow للحفاظ على الجودة قدر الإمكان أثناء النقل
+    retval, buffer_text = cv2.imencode('.png', image_chunk)
+    if not retval: return image_chunk
+    b64_image = base64.b64encode(buffer_text).decode('utf-8')
+
+    try:
+        print(f"   Processing chunk {chunk_index + 1}/{total_chunks} at Y={y_offset}...")
+        emit_progress(2, f"جاري الكشف في الجزء {chunk_index + 1} من {total_chunks}...", 
+                      30 + int((chunk_index / total_chunks) * 60), sid)
+        
+        predictions = get_roboflow_predictions(ROBOFLOW_SPEECH_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
+        
+        whitened_in_chunk = 0
+        for pred in predictions:
+            points = pred.get("points", [])
+            if len(points) >= 3:
+                polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
+                
+                # التأكد من عدم خروج النقاط عن حدود الجزء
+                polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1)
+                polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
+                
+                if is_background_white(image_chunk, polygon_np):
+                    # ملء المضلع باللون الأبيض
+                    cv2.fillPoly(result_chunk, [polygon_np], (255, 255, 255))
+                    whitened_in_chunk += 1
+        
+        print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_in_chunk} bubbles.")
+        return result_chunk
+
+    except Exception as e:
+        print(f"⚠️ Error processing chunk {chunk_index}: {e}")
+        # في حال الفشل في جزء معين، نعيد الجزء الأصلي دون تعديل
+        return image_chunk
+
+# --- Main Processing Task ---
 def process_image_task(image_path, output_filename_base, mode, sid):
-    print(f"ℹ️ SID {sid}: Starting single task for {os.path.basename(image_path)}")
+    print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
     start_time = time.time()
     final_output_path = ""
     result_data = {}
@@ -101,56 +153,58 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         
         # Ensure 3 channels
         if len(image.shape) == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR) # Convert BGRA to BGR
 
-        h_img, w_img = image.shape[:2]
-        result_image = image.copy()
+        h_full, w_full = image.shape[:2]
         
-        emit_progress(1, "ترميز الصورة وإرسالها لنموذج الكشف...", 15, sid)
-        
-        # Encode image
-        retval, buffer_text = cv2.imencode('.jpg', image)
-        if not retval: raise IOError("Could not encode image to buffer.")
-        b64_image = base64.b64encode(buffer_text).decode('utf-8')
-        
-        # Get Predictions using the NEW endpoint
-        emit_progress(2, "جاري الكشف عن الفقاعات بواسطة Roboflow...", 30, sid)
-        predictions = get_roboflow_predictions(ROBOFLOW_SPEECH_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
-        
-        emit_progress(3, f"تم الكشف عن {len(predictions)} فقاعة. جاري التبييض...", 60, sid)
-
-        whitened_count = 0
-        for i, pred in enumerate(predictions):
-            points = pred.get("points", [])
-            # تحديث شريط التقدم ببطء
-            if i % 10 == 0 or i == len(predictions) - 1:
-                progress_val = 60 + int((i / len(predictions)) * 30)
-                emit_progress(3, f"تبييض الفقاعات...", progress_val, sid)
-
-            if len(points) >= 3:
-                # إنشاء مضلع (Polygon)
-                polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
-                # التأكد من عدم خروج النقاط عن حدود الصورة
-                polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1)
-                polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
-                
-                # التحقق والتبييض
-                if is_background_white(image, polygon_np):
-                    # ملء المضلع باللون الأبيض (255, 255, 255)
-                    cv2.fillPoly(result_image, [polygon_np], (255, 255, 255))
-                    whitened_count += 1
-        
-        emit_progress(4, f"اكتمل التبييض. تم تبييض {whitened_count} فقاعة.", 90, sid)
+        # --- منطق التقسيم الجديد ---
+        if h_full > MAX_SPLIT_HEIGHT:
+            print(f"ℹ️ Image height ({h_full}px) exceeds limit ({MAX_SPLIT_HEIGHT}px). Splitting...")
+            emit_progress(1, "الصورة طويلة جداً، جاري تقسيمها ومعالجتها...", 10, sid)
+            
+            # التقسيم إلى جزأين فقط (15000 والباقي)
+            y_start_2 = MAX_SPLIT_HEIGHT
+            
+            # الجزء الأول (بما في ذلك التداخل)
+            chunk1 = image[0:y_start_2 + SPLIT_OVERLAP, :]
+            
+            # الجزء الثاني (البدء من التداخل)
+            chunk2 = image[y_start_2 - SPLIT_OVERLAP:h_full, :]
+            
+            # 1. معالجة الجزء الأول
+            processed_chunk1 = process_single_chunk(chunk1, 0, 0, 2, sid)
+            
+            # 2. معالجة الجزء الثاني
+            processed_chunk2 = process_single_chunk(chunk2, y_start_2 - SPLIT_OVERLAP, 1, 2, sid)
+            
+            print("ℹ️ Stitching results back together...")
+            emit_progress(4, "دمج الأجزاء...", 90, sid)
+            
+            # إزالة منطقة التداخل من الجزء الأول
+            processed_chunk1_cropped = processed_chunk1[0:y_start_2, :]
+            
+            # إزالة منطقة التداخل من الجزء الثاني (من الأعلى)
+            # يكون الارتفاع المتبقي هو ارتفاع الجزء الثاني الكلي ناقص منطقة التداخل
+            processed_chunk2_cropped = processed_chunk2[SPLIT_OVERLAP:, :]
+            
+            # دمج الأجزاء رأسياً
+            final_image = cv2.vconcat([processed_chunk1_cropped, processed_chunk2_cropped])
+            
+        else:
+            # معالجة عادية للصورة الصغيرة
+            final_image = process_single_chunk(image, 0, 0, 1, sid)
 
         # Save Result
-        output_filename = f"{output_filename_base}_cleaned.jpg"
+        # حفظ كـ PNG للحفاظ على الجودة الأصلية (Lossless)
+        output_filename = f"{output_filename_base}_cleaned.png" 
         final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
         
-        emit_progress(5, "حفظ الصورة النهائية...", 95, sid)
-        cv2.imwrite(final_output_path, result_image, [cv2.IMWRITE_JPEG_QUALITY, 95]) # حفظ بجودة 95
+        emit_progress(5, "حفظ الصورة النهائية (PNG)...", 95, sid)
+        # عدم تحديد جودة هنا، لأن PNG تكون lossless بشكل افتراضي
+        cv2.imwrite(final_output_path, final_image) 
         
         processing_time = time.time() - start_time
-        print(f"✔️ SID {sid} Complete {processing_time:.2f}s. Whitened: {whitened_count}")
+        print(f"✔️ SID {sid} Complete {processing_time:.2f}s.")
         emit_progress(6, "تمت المعالجة!", 100, sid)
         
         result_data = {
@@ -163,14 +217,13 @@ def process_image_task(image_path, output_filename_base, mode, sid):
     except Exception as e:
         print(f"❌❌❌ SID {sid}: FATAL ERROR: {e}")
         traceback.print_exc()
-        # نستخدم رسالة خطأ أكثر وضوحاً للمستخدم
-        error_msg = str(e).split('\n')[0] # نأخذ السطر الأول فقط
+        error_msg = str(e).split('\n')[0]
         emit_error(f"خطأ في المعالجة: {error_msg}", sid)
     finally:
         # Cleanup
         try:
             if image_path and os.path.exists(image_path):
-                # لا نحذف إذا كان جزءاً من مجلد zip مؤقت، بل نحذف ملف الصورة المؤقتة فقط
+                # حذف الملف بعد الانتهاء
                 if 'temp_zip_' not in image_path:
                     os.remove(image_path)
         except: pass
@@ -244,7 +297,6 @@ def handle_batch(data):
     sid = request.sid
     images = data.get('images_to_process', [])
     socketio.emit('batch_started', {'total_images': len(images)}, room=sid)
-    # ملاحظة: عند انتهاء معالجة دفعة ZIP، يجب حذف المجلد المؤقت بعد انتهاء آخر مهمة
     for img in images:
         socketio.start_background_task(process_image_task, img['saved_path'], img['output_base'], 'clean_white', sid)
 
