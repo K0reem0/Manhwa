@@ -32,7 +32,7 @@ SPLIT_OVERLAP = 50       # التداخل بين الأجزاء
 
 # --- نقاط نهاية Roboflow ---
 ROBOFLOW_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
-ROBOFLOW_TEXT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1' # النموذج الجديد للكشف عن النص
+ROBOFLOW_TEXT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
 
 # --- Flask App Setup (كما هو) ---
 app = Flask(__name__)
@@ -66,11 +66,20 @@ def emit_error(message, sid):
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01)
 
-def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
-    """Fetches predictions from Roboflow using the specified endpoint."""
+def get_roboflow_predictions(endpoint_url, api_key, image_b64, confidence=None, timeout=60):
+    """
+    Fetches predictions from Roboflow using the specified endpoint.
+    تم إضافة معامل 'confidence' الاختياري.
+    """
     if not api_key: raise ValueError("Missing Roboflow API Key.")
+    
+    url = f"{endpoint_url}?api_key={api_key}"
+    if confidence is not None:
+        # إضافة عتبة الثقة إلى رابط الاستدعاء (1% = 1)
+        url += f"&confidence={confidence}" 
+        
     try:
-        response = requests.post(f"{endpoint_url}?api_key={api_key}", data=image_b64, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=timeout)
+        response = requests.post(url, data=image_b64, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=timeout)
         response.raise_for_status()
         return response.json().get("predictions", [])
     except Exception as e:
@@ -110,12 +119,13 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
                   30 + int((chunk_index / total_chunks) * 20), sid)
     
     # Encode chunk for Roboflow (using PNG for better quality)
-    retval, buffer_text = cv2.imencode('.png', image_chunk)
+    retval, buffer_text = cv2.imencode('.png', image_chunk) # استخدام PNG للترميز قبل الإرسال
     if not retval: return image_chunk
     b64_image = base64.b64encode(buffer_text).decode('utf-8')
 
     try:
-        bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
+        # !!! استدعاء نموذج الفقاعات بعتبة ثقة 1% (confidence=1) !!!
+        bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image, confidence=1)
         
         whitened_count = 0
         
@@ -129,7 +139,6 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
             x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
 
             # 3. اقتصاص الفقاعة لإرسالها لنموذج النص
-            # إضافة هامش بسيط (5 بكسل) لتجنب قص الحواف
             margin = 5
             x_min = max(0, x_min - margin)
             y_min = max(0, y_min - margin)
@@ -139,36 +148,32 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
             cropped_bubble = image_chunk[y_min:y_max, x_min:x_max]
             h_crop, w_crop = cropped_bubble.shape[:2]
 
-            # التأكد من أن المنطقة المقتطعة صالحة
             if h_crop == 0 or w_crop == 0: continue
             
             # ترميز الفقاعة المقتطعة
-            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble)
+            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble) # استخدام PNG للترميز
             if not retval_crop: continue
             b64_crop = base64.b64encode(buffer_crop).decode('utf-8')
 
-            # 4. الكشف عن النص داخل الفقاعة المقتطعة (ROBOFLOW_TEXT_URL)
+            # 4. الكشف عن النص داخل الفقاعة المقتطعة (بدون تحديد confidence)
             text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop)
             
-            # 5. تطبيق التبييض على النص المكتشف (بالنسبة للصورة الأصلية)
+            # 5. تطبيق التبييض على النص المكتشف
             if text_predictions:
                 for text_pred in text_predictions:
                     text_points = text_pred.get("points", [])
                     if len(text_points) < 3: continue
 
-                    # تحويل إحداثيات النص من إحداثيات الصورة المقتطعة إلى إحداثيات الصورة الأصلية (الـ chunk)
+                    # تحويل الإحداثيات إلى إحداثيات الصورة الأصلية (الـ chunk)
                     text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min, int(p["y"]) + y_min] 
                                                         for p in text_points], dtype=np.int32)
                     
-                    # التأكد من أن منطقة النص داخل الفقاعة بيضاء قبل التبييض لتجنب تبييض الفقاعات الداكنة
                     if is_background_white(image_chunk, text_polygon_chunk_coords):
-                        # تبييض منطقة النص فقط في الصورة الناتجة
                         cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
                         whitened_count += 1
             
         print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_count} text areas.")
         
-        # تحديث شريط التقدم: 50% للفقاعات + 40% للنصوص
         emit_progress(3, f"اكتمل تبييض النصوص في الجزء {chunk_index + 1}...", 
                       50 + int((chunk_index / total_chunks) * 40), sid)
         
@@ -176,12 +181,10 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
 
     except Exception as e:
         print(f"⚠️ Error processing chunk {chunk_index}: {e}")
-        # في حال الفشل في جزء معين، نعيد الجزء الأصلي دون تعديل
         return image_chunk
 
-# --- Main Processing Task (كما هو منطق التقسيم) ---
+# --- Main Processing Task ---
 def process_image_task(image_path, output_filename_base, mode, sid):
-    # ... (كود تحميل الصورة وتهيئة المتغيرات) ...
     print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
     start_time = time.time()
     final_output_path = ""
@@ -192,9 +195,8 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         image = cv2.imread(image_path)
         if image is None: raise ValueError(f"Could not load image: {image_path}")
         
-        # Ensure 3 channels
         if len(image.shape) == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR) # Convert BGRA to BGR
+        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR) 
 
         h_full, w_full = image.shape[:2]
         
@@ -203,40 +205,32 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             print(f"ℹ️ Image height ({h_full}px) exceeds limit ({MAX_SPLIT_HEIGHT}px). Splitting...")
             emit_progress(1, "الصورة طويلة جداً، جاري تقسيمها ومعالجتها...", 10, sid)
             
-            # التقسيم إلى جزأين فقط (15000 والباقي)
             y_start_2 = MAX_SPLIT_HEIGHT
             
             chunk1 = image[0:y_start_2 + SPLIT_OVERLAP, :]
             chunk2 = image[y_start_2 - SPLIT_OVERLAP:h_full, :]
             
-            # 1. معالجة الجزء الأول
             processed_chunk1 = process_single_chunk(chunk1, 0, 0, 2, sid)
-            
-            # 2. معالجة الجزء الثاني
             processed_chunk2 = process_single_chunk(chunk2, y_start_2 - SPLIT_OVERLAP, 1, 2, sid)
             
             print("ℹ️ Stitching results back together...")
             emit_progress(4, "دمج الأجزاء...", 90, sid)
             
-            # إزالة منطقة التداخل من الجزء الأول
             processed_chunk1_cropped = processed_chunk1[0:y_start_2, :]
-            
-            # إزالة منطقة التداخل من الجزء الثاني (من الأعلى)
             processed_chunk2_cropped = processed_chunk2[SPLIT_OVERLAP:, :]
             
-            # دمج الأجزاء رأسياً
             final_image = cv2.vconcat([processed_chunk1_cropped, processed_chunk2_cropped])
             
         else:
-            # معالجة عادية للصورة الصغيرة
             final_image = process_single_chunk(image, 0, 0, 1, sid)
 
         # Save Result
-        output_filename = f"{output_filename_base}_cleaned.png" 
+        # !!! حفظ كـ JPEG بجودة 95% !!!
+        output_filename = f"{output_filename_base}_cleaned.jpg" 
         final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
         
-        emit_progress(5, "حفظ الصورة النهائية (PNG)...", 95, sid)
-        cv2.imwrite(final_output_path, final_image) 
+        emit_progress(5, "حفظ الصورة النهائية (JPEG)...", 95, sid)
+        cv2.imwrite(final_output_path, final_image, [cv2.IMWRITE_JPEG_QUALITY, 95]) 
         
         processing_time = time.time() - start_time
         print(f"✔️ SID {sid} Complete {processing_time:.2f}s.")
@@ -255,7 +249,6 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         error_msg = str(e).split('\n')[0]
         emit_error(f"خطأ في المعالجة: {error_msg}", sid)
     finally:
-        # Cleanup
         try:
             if image_path and os.path.exists(image_path):
                 if 'temp_zip_' not in image_path:
