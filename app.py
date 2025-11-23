@@ -28,19 +28,20 @@ RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
 MAX_SPLIT_HEIGHT = 15000  # الارتفاع الأقصى قبل التقسيم
-SPLIT_OVERLAP = 50       # التداخل بين الأجزاء لضمان عدم فقدان الفقاعات على الحافة
+SPLIT_OVERLAP = 50       # التداخل بين الأجزاء
 
-# --- تحديث نقطة نهاية Roboflow ---
-ROBOFLOW_SPEECH_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
+# --- نقاط نهاية Roboflow ---
+ROBOFLOW_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
+ROBOFLOW_TEXT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1' # النموذج الجديد للكشف عن النص
 
-# --- Flask App Setup ---
+# --- Flask App Setup (كما هو) ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'change_this_in_production')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['RESULT_FOLDER'] = RESULT_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 
-# --- SocketIO Setup ---
+# --- SocketIO Setup (كما هو) ---
 socketio = SocketIO(
     app,
     async_mode='eventlet',
@@ -51,7 +52,7 @@ socketio = SocketIO(
     ping_interval=25
 )
 
-# --- Ensure directories exist ---
+# --- Ensure directories exist (كما هو) ---
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULT_FOLDER, exist_ok=True)
 
@@ -79,22 +80,23 @@ def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
 def is_background_white(image, polygon_pts, threshold=220):
     """
     Checks if the area inside the polygon is mostly white/bright.
-    تم رفع العتبة (threshold) إلى 220 لتقليل احتمالية تبييض الحدود السوداء الداكنة.
     """
     try:
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        # ملء المضلع في القناع
         cv2.fillPoly(mask, [polygon_pts], 255)
         
-        # استخراج متوسط قيمة اللون الرمادي داخل المضلع
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         mean_val = cv2.mean(gray, mask=mask)[0]
         
-        # إذا كان متوسط القيمة أعلى من العتبة (220) نعتبرها بيضاء
         return mean_val > threshold
     except Exception as e:
-        # إذا حدث خطأ في الحساب، نفترض أنها ليست بيضاء لتجنب التبييض الخاطئ
         return False
+
+def get_bounding_box(polygon_np):
+    """Calculates min/max x and y from a polygon."""
+    x_coords = polygon_np[:, 0]
+    y_coords = polygon_np[:, 1]
+    return np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)
 
 def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
     """
@@ -103,35 +105,73 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
     result_chunk = image_chunk.copy()
     h_img, w_img = image_chunk.shape[:2]
     
-    # Encode chunk
-    # نستخدم PNG هنا لترميز الجزء (Chunk) إلى base64 لـ Roboflow للحفاظ على الجودة قدر الإمكان أثناء النقل
+    # 1. الكشف عن الفقاعات باستخدام النموذج الأول (ROBOFLOW_BUBBLE_URL)
+    emit_progress(2, f"الكشف عن الفقاعات في الجزء {chunk_index + 1}...", 
+                  30 + int((chunk_index / total_chunks) * 20), sid)
+    
+    # Encode chunk for Roboflow (using PNG for better quality)
     retval, buffer_text = cv2.imencode('.png', image_chunk)
     if not retval: return image_chunk
     b64_image = base64.b64encode(buffer_text).decode('utf-8')
 
     try:
-        print(f"   Processing chunk {chunk_index + 1}/{total_chunks} at Y={y_offset}...")
-        emit_progress(2, f"جاري الكشف في الجزء {chunk_index + 1} من {total_chunks}...", 
-                      30 + int((chunk_index / total_chunks) * 60), sid)
+        bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
         
-        predictions = get_roboflow_predictions(ROBOFLOW_SPEECH_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
+        whitened_count = 0
         
-        whitened_in_chunk = 0
-        for pred in predictions:
-            points = pred.get("points", [])
-            if len(points) >= 3:
-                polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
-                
-                # التأكد من عدم خروج النقاط عن حدود الجزء
-                polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1)
-                polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
-                
-                if is_background_white(image_chunk, polygon_np):
-                    # ملء المضلع باللون الأبيض
-                    cv2.fillPoly(result_chunk, [polygon_np], (255, 255, 255))
-                    whitened_in_chunk += 1
+        # 2. المرور على كل فقاعة تم اكتشافها
+        for i, bubble_pred in enumerate(bubble_predictions):
+            bubble_points = bubble_pred.get("points", [])
+            if len(bubble_points) < 3: continue
+            
+            # الحصول على إحداثيات الفقاعة كـ مضلع وكمربع محيط
+            bubble_polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in bubble_points], dtype=np.int32)
+            x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
+
+            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص
+            # إضافة هامش بسيط (5 بكسل) لتجنب قص الحواف
+            margin = 5
+            x_min = max(0, x_min - margin)
+            y_min = max(0, y_min - margin)
+            x_max = min(w_img, x_max + margin)
+            y_max = min(h_img, y_max + margin)
+
+            cropped_bubble = image_chunk[y_min:y_max, x_min:x_max]
+            h_crop, w_crop = cropped_bubble.shape[:2]
+
+            # التأكد من أن المنطقة المقتطعة صالحة
+            if h_crop == 0 or w_crop == 0: continue
+            
+            # ترميز الفقاعة المقتطعة
+            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble)
+            if not retval_crop: continue
+            b64_crop = base64.b64encode(buffer_crop).decode('utf-8')
+
+            # 4. الكشف عن النص داخل الفقاعة المقتطعة (ROBOFLOW_TEXT_URL)
+            text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop)
+            
+            # 5. تطبيق التبييض على النص المكتشف (بالنسبة للصورة الأصلية)
+            if text_predictions:
+                for text_pred in text_predictions:
+                    text_points = text_pred.get("points", [])
+                    if len(text_points) < 3: continue
+
+                    # تحويل إحداثيات النص من إحداثيات الصورة المقتطعة إلى إحداثيات الصورة الأصلية (الـ chunk)
+                    text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min, int(p["y"]) + y_min] 
+                                                        for p in text_points], dtype=np.int32)
+                    
+                    # التأكد من أن منطقة النص داخل الفقاعة بيضاء قبل التبييض لتجنب تبييض الفقاعات الداكنة
+                    if is_background_white(image_chunk, text_polygon_chunk_coords):
+                        # تبييض منطقة النص فقط في الصورة الناتجة
+                        cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
+                        whitened_count += 1
+            
+        print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_count} text areas.")
         
-        print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_in_chunk} bubbles.")
+        # تحديث شريط التقدم: 50% للفقاعات + 40% للنصوص
+        emit_progress(3, f"اكتمل تبييض النصوص في الجزء {chunk_index + 1}...", 
+                      50 + int((chunk_index / total_chunks) * 40), sid)
+        
         return result_chunk
 
     except Exception as e:
@@ -139,8 +179,9 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
         # في حال الفشل في جزء معين، نعيد الجزء الأصلي دون تعديل
         return image_chunk
 
-# --- Main Processing Task ---
+# --- Main Processing Task (كما هو منطق التقسيم) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
+    # ... (كود تحميل الصورة وتهيئة المتغيرات) ...
     print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
     start_time = time.time()
     final_output_path = ""
@@ -157,7 +198,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
 
         h_full, w_full = image.shape[:2]
         
-        # --- منطق التقسيم الجديد ---
+        # --- منطق التقسيم ---
         if h_full > MAX_SPLIT_HEIGHT:
             print(f"ℹ️ Image height ({h_full}px) exceeds limit ({MAX_SPLIT_HEIGHT}px). Splitting...")
             emit_progress(1, "الصورة طويلة جداً، جاري تقسيمها ومعالجتها...", 10, sid)
@@ -165,10 +206,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             # التقسيم إلى جزأين فقط (15000 والباقي)
             y_start_2 = MAX_SPLIT_HEIGHT
             
-            # الجزء الأول (بما في ذلك التداخل)
             chunk1 = image[0:y_start_2 + SPLIT_OVERLAP, :]
-            
-            # الجزء الثاني (البدء من التداخل)
             chunk2 = image[y_start_2 - SPLIT_OVERLAP:h_full, :]
             
             # 1. معالجة الجزء الأول
@@ -184,7 +222,6 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             processed_chunk1_cropped = processed_chunk1[0:y_start_2, :]
             
             # إزالة منطقة التداخل من الجزء الثاني (من الأعلى)
-            # يكون الارتفاع المتبقي هو ارتفاع الجزء الثاني الكلي ناقص منطقة التداخل
             processed_chunk2_cropped = processed_chunk2[SPLIT_OVERLAP:, :]
             
             # دمج الأجزاء رأسياً
@@ -195,12 +232,10 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             final_image = process_single_chunk(image, 0, 0, 1, sid)
 
         # Save Result
-        # حفظ كـ PNG للحفاظ على الجودة الأصلية (Lossless)
         output_filename = f"{output_filename_base}_cleaned.png" 
         final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
         
         emit_progress(5, "حفظ الصورة النهائية (PNG)...", 95, sid)
-        # عدم تحديد جودة هنا، لأن PNG تكون lossless بشكل افتراضي
         cv2.imwrite(final_output_path, final_image) 
         
         processing_time = time.time() - start_time
@@ -223,12 +258,11 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         # Cleanup
         try:
             if image_path and os.path.exists(image_path):
-                # حذف الملف بعد الانتهاء
                 if 'temp_zip_' not in image_path:
                     os.remove(image_path)
         except: pass
 
-# --- Routes (بدون تغيير) ---
+# --- Routes and Socket Events (بدون تغيير) ---
 @app.route('/')
 def index(): return render_template('index.html')
 
@@ -283,7 +317,6 @@ def handle_zip_upload():
         shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({'error': str(e)}), 500
 
-# --- Socket Events (بدون تغيير) ---
 @socketio.on('start_processing')
 def handle_start_processing(data):
     sid = request.sid
