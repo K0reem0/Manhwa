@@ -27,14 +27,17 @@ UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-MAX_SPLIT_HEIGHT = 5000  # أقصى ارتفاع للجزء الواحد
+# تم إزالة MAX_SPLIT_HEIGHT هنا
+
+# --- تحديث نقطة نهاية Roboflow ---
+ROBOFLOW_SPEECH_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
 
 # --- Flask App Setup ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'change_this_in_production')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['RESULT_FOLDER'] = RESULT_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 # رفع الحد لـ 100 ميجا للصور الطويلة
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 
 # --- SocketIO Setup ---
 socketio = SocketIO(
@@ -43,7 +46,7 @@ socketio = SocketIO(
     cors_allowed_origins="*",
     logger=False,
     engineio_logger=False,
-    ping_timeout=120, # زيادة وقت الانتظار للملفات الكبيرة
+    ping_timeout=120,
     ping_interval=25
 )
 
@@ -62,7 +65,7 @@ def emit_error(message, sid):
     socketio.sleep(0.01)
 
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
-    """Fetches predictions from Roboflow."""
+    """Fetches predictions from Roboflow using the specified endpoint."""
     if not api_key: raise ValueError("Missing Roboflow API Key.")
     try:
         response = requests.post(f"{endpoint_url}?api_key={api_key}", data=image_b64, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=timeout)
@@ -70,7 +73,7 @@ def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
         return response.json().get("predictions", [])
     except Exception as e:
         print(f"❌ Roboflow Error: {e}")
-        raise # نعيد رفع الخطأ ليتم التعامل معه في الدالة الرئيسية
+        raise ValueError(f"فشل الاتصال بنموذج Roboflow. تأكد من صحة المفتاح والرابط. الخطأ: {str(e)}")
 
 def is_background_white(image, polygon_pts, threshold=180):
     """Checks if the area inside the polygon is mostly white/bright."""
@@ -79,53 +82,14 @@ def is_background_white(image, polygon_pts, threshold=180):
         cv2.fillPoly(mask, [polygon_pts], 255)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         mean_val = cv2.mean(gray, mask=mask)[0]
-        return mean_val > threshold
+        # نرفع العتبة قليلاً إلى 200 لضمان تبييض الخلفيات البيضاء بوضوح
+        return mean_val > 200 
     except Exception as e:
         return False
 
-def process_single_chunk(image_chunk, chunk_index, total_chunks, sid):
-    """
-    دالة مساعدة لمعالجة جزء واحد من الصورة (Detection + Whitening)
-    """
-    ROBOFLOW_TEXT_DETECT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
-    
-    h_img, w_img = image_chunk.shape[:2]
-    result_chunk = image_chunk.copy()
-    
-    # Encode chunk
-    retval, buffer_text = cv2.imencode('.jpg', image_chunk)
-    if not retval: return image_chunk
-    b64_image = base64.b64encode(buffer_text).decode('utf-8')
-
-    try:
-        print(f"   Processing chunk {chunk_index + 1}/{total_chunks}...")
-        emit_progress(2, f"جاري معالجة الجزء {chunk_index + 1} من {total_chunks}...", 
-                      30 + int((chunk_index / total_chunks) * 60), sid)
-        
-        predictions = get_roboflow_predictions(ROBOFLOW_TEXT_DETECT_URL, ROBOFLOW_API_KEY, b64_image)
-        
-        whitened_in_chunk = 0
-        for pred in predictions:
-            points = pred.get("points", [])
-            if len(points) >= 3:
-                polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
-                polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1)
-                polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
-                
-                if is_background_white(image_chunk, polygon_np, threshold=200):
-                    cv2.fillPoly(result_chunk, [polygon_np], (255, 255, 255))
-                    whitened_in_chunk += 1
-        
-        return result_chunk
-
-    except Exception as e:
-        print(f"⚠️ Error processing chunk {chunk_index}: {e}")
-        # في حال الفشل في جزء معين، نعيد الجزء الأصلي دون تعديل لتجنب فشل الصورة بالكامل
-        return image_chunk
-
-# --- Main Processing Task ---
+# --- Main Processing Task (بدون تقسيم) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
-    print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
+    print(f"ℹ️ SID {sid}: Starting single task for {os.path.basename(image_path)}")
     start_time = time.time()
     final_output_path = ""
     result_data = {}
@@ -139,46 +103,55 @@ def process_image_task(image_path, output_filename_base, mode, sid):
         if len(image.shape) == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
 
-        h_full, w_full = image.shape[:2]
+        h_img, w_img = image.shape[:2]
+        result_image = image.copy()
         
-        # --- منطق التقسيم (Slicing Logic) ---
-        if h_full > MAX_SPLIT_HEIGHT:
-            print(f"ℹ️ Image height ({h_full}px) exceeds limit ({MAX_SPLIT_HEIGHT}px). Splitting...")
-            emit_progress(1, "الصورة طويلة جداً، جاري تقسيمها...", 10, sid)
-            
-            processed_chunks = []
-            num_chunks = math.ceil(h_full / MAX_SPLIT_HEIGHT)
-            
-            for i in range(num_chunks):
-                y_start = i * MAX_SPLIT_HEIGHT
-                y_end = min((i + 1) * MAX_SPLIT_HEIGHT, h_full)
+        emit_progress(1, "ترميز الصورة وإرسالها لنموذج الكشف...", 15, sid)
+        
+        # Encode image
+        retval, buffer_text = cv2.imencode('.jpg', image)
+        if not retval: raise IOError("Could not encode image to buffer.")
+        b64_image = base64.b64encode(buffer_text).decode('utf-8')
+        
+        # Get Predictions using the NEW endpoint
+        emit_progress(2, "جاري الكشف عن الفقاعات بواسطة Roboflow...", 30, sid)
+        predictions = get_roboflow_predictions(ROBOFLOW_SPEECH_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image)
+        
+        emit_progress(3, f"تم الكشف عن {len(predictions)} فقاعة. جاري التبييض...", 60, sid)
+
+        whitened_count = 0
+        for i, pred in enumerate(predictions):
+            points = pred.get("points", [])
+            # تحديث شريط التقدم ببطء
+            if i % 10 == 0 or i == len(predictions) - 1:
+                progress_val = 60 + int((i / len(predictions)) * 30)
+                emit_progress(3, f"تبييض الفقاعات...", progress_val, sid)
+
+            if len(points) >= 3:
+                # إنشاء مضلع (Polygon)
+                polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in points], dtype=np.int32)
+                # التأكد من عدم خروج النقاط عن حدود الصورة
+                polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w_img - 1)
+                polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h_img - 1)
                 
-                # اقتطاع الجزء
-                chunk = image[y_start:y_end, :]
-                
-                # معالجة الجزء
-                processed_chunk = process_single_chunk(chunk, i, num_chunks, sid)
-                processed_chunks.append(processed_chunk)
-            
-            print("ℹ️ Merging chunks back together...")
-            emit_progress(4, "دمج الأجزاء...", 90, sid)
-            # دمج الأجزاء رأسياً
-            final_image = cv2.vconcat(processed_chunks)
-            
-        else:
-            # معالجة عادية للصورة الصغيرة
-            final_image = process_single_chunk(image, 0, 1, sid)
+                # التحقق والتبييض
+                if is_background_white(image, polygon_np):
+                    # ملء المضلع باللون الأبيض (255, 255, 255)
+                    cv2.fillPoly(result_image, [polygon_np], (255, 255, 255))
+                    whitened_count += 1
+        
+        emit_progress(4, f"اكتمل التبييض. تم تبييض {whitened_count} فقاعة.", 90, sid)
 
         # Save Result
         output_filename = f"{output_filename_base}_cleaned.jpg"
         final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
         
         emit_progress(5, "حفظ الصورة النهائية...", 95, sid)
-        cv2.imwrite(final_output_path, final_image)
+        cv2.imwrite(final_output_path, result_image, [cv2.IMWRITE_JPEG_QUALITY, 95]) # حفظ بجودة 95
         
         processing_time = time.time() - start_time
-        print(f"✔️ SID {sid} Complete {processing_time:.2f}s.")
-        emit_progress(6, "تم!", 100, sid)
+        print(f"✔️ SID {sid} Complete {processing_time:.2f}s. Whitened: {whitened_count}")
+        emit_progress(6, "تمت المعالجة!", 100, sid)
         
         result_data = {
             'mode': 'clean_white', 
@@ -190,14 +163,19 @@ def process_image_task(image_path, output_filename_base, mode, sid):
     except Exception as e:
         print(f"❌❌❌ SID {sid}: FATAL ERROR: {e}")
         traceback.print_exc()
-        emit_error(f"خطأ في الخادم: {str(e)}", sid)
+        # نستخدم رسالة خطأ أكثر وضوحاً للمستخدم
+        error_msg = str(e).split('\n')[0] # نأخذ السطر الأول فقط
+        emit_error(f"خطأ في المعالجة: {error_msg}", sid)
     finally:
+        # Cleanup
         try:
             if image_path and os.path.exists(image_path):
-                os.remove(image_path)
+                # لا نحذف إذا كان جزءاً من مجلد zip مؤقت، بل نحذف ملف الصورة المؤقتة فقط
+                if 'temp_zip_' not in image_path:
+                    os.remove(image_path)
         except: pass
 
-# --- Routes ---
+# --- Routes (بدون تغيير) ---
 @app.route('/')
 def index(): return render_template('index.html')
 
@@ -252,7 +230,7 @@ def handle_zip_upload():
         shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({'error': str(e)}), 500
 
-# --- Socket Events ---
+# --- Socket Events (بدون تغيير) ---
 @socketio.on('start_processing')
 def handle_start_processing(data):
     sid = request.sid
@@ -266,6 +244,7 @@ def handle_batch(data):
     sid = request.sid
     images = data.get('images_to_process', [])
     socketio.emit('batch_started', {'total_images': len(images)}, room=sid)
+    # ملاحظة: عند انتهاء معالجة دفعة ZIP، يجب حذف المجلد المؤقت بعد انتهاء آخر مهمة
     for img in images:
         socketio.start_background_task(process_image_task, img['saved_path'], img['output_base'], 'clean_white', sid)
 
