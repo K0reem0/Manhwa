@@ -27,7 +27,7 @@ UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-MAX_SPLIT_HEIGHT = 15000  # الارتفاع الأقصى قبل التقسيم
+MAX_SPLIT_HEIGHT = 10000  # الارتفاع الأقصى قبل التقسيم
 SPLIT_OVERLAP = 50       # التداخل بين الأجزاء
 
 # --- نقاط نهاية Roboflow ---
@@ -69,13 +69,12 @@ def emit_error(message, sid):
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, confidence=None, timeout=60):
     """
     Fetches predictions from Roboflow using the specified endpoint.
-    تم إضافة معامل 'confidence' الاختياري.
     """
     if not api_key: raise ValueError("Missing Roboflow API Key.")
     
     url = f"{endpoint_url}?api_key={api_key}"
     if confidence is not None:
-        # إضافة عتبة الثقة إلى رابط الاستدعاء (1% = 1)
+        # إضافة عتبة الثقة إلى رابط الاستدعاء
         url += f"&confidence={confidence}" 
         
     try:
@@ -118,13 +117,12 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
     emit_progress(2, f"الكشف عن الفقاعات في الجزء {chunk_index + 1}...", 
                   30 + int((chunk_index / total_chunks) * 20), sid)
     
-    # Encode chunk for Roboflow (using PNG for better quality)
-    retval, buffer_text = cv2.imencode('.png', image_chunk) # استخدام PNG للترميز قبل الإرسال
+    retval, buffer_text = cv2.imencode('.png', image_chunk)
     if not retval: return image_chunk
     b64_image = base64.b64encode(buffer_text).decode('utf-8')
 
     try:
-        # !!! استدعاء نموذج الفقاعات بعتبة ثقة 1% (confidence=1) !!!
+        # استدعاء نموذج الفقاعات بعتبة ثقة 1% (confidence=1)
         bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image, confidence=1)
         
         whitened_count = 0
@@ -138,25 +136,28 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
             bubble_polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in bubble_points], dtype=np.int32)
             x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
 
-            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص
-            margin = 5
-            x_min = max(0, x_min - margin)
-            y_min = max(0, y_min - margin)
-            x_max = min(w_img, x_max + margin)
-            y_max = min(h_img, y_max + margin)
+            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص مع هامش موسع
+            # *** التعديل: زيادة الهامش لتوسيع منطقة الاقتصاص (من 5 إلى 20 بكسل) ***
+            EXPANSION_MARGIN = 20
+            
+            x_min_exp = max(0, x_min - EXPANSION_MARGIN)
+            y_min_exp = max(0, y_min - EXPANSION_MARGIN)
+            x_max_exp = min(w_img, x_max + EXPANSION_MARGIN)
+            y_max_exp = min(h_img, y_max + EXPANSION_MARGIN)
 
-            cropped_bubble = image_chunk[y_min:y_max, x_min:x_max]
+            cropped_bubble = image_chunk[y_min_exp:y_max_exp, x_min_exp:x_max_exp]
             h_crop, w_crop = cropped_bubble.shape[:2]
 
             if h_crop == 0 or w_crop == 0: continue
             
             # ترميز الفقاعة المقتطعة
-            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble) # استخدام PNG للترميز
+            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble)
             if not retval_crop: continue
             b64_crop = base64.b64encode(buffer_crop).decode('utf-8')
 
-            # 4. الكشف عن النص داخل الفقاعة المقتطعة (بدون تحديد confidence)
-            text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop)
+            # 4. الكشف عن النص داخل الفقاعة المقتطعة
+            # *** التعديل: استدعاء نموذج النص بعتبة ثقة 25% ***
+            text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop, confidence=25)
             
             # 5. تطبيق التبييض على النص المكتشف
             if text_predictions:
@@ -164,8 +165,8 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
                     text_points = text_pred.get("points", [])
                     if len(text_points) < 3: continue
 
-                    # تحويل الإحداثيات إلى إحداثيات الصورة الأصلية (الـ chunk)
-                    text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min, int(p["y"]) + y_min] 
+                    # تحويل الإحداثيات إلى إحداثيات الصورة الأصلية (الـ chunk) باستخدام الإحداثيات الموسعة
+                    text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min_exp, int(p["y"]) + y_min_exp] 
                                                         for p in text_points], dtype=np.int32)
                     
                     if is_background_white(image_chunk, text_polygon_chunk_coords):
@@ -183,7 +184,7 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
         print(f"⚠️ Error processing chunk {chunk_index}: {e}")
         return image_chunk
 
-# --- Main Processing Task ---
+# --- Main Processing Task (كما هو منطق التقسيم) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
     print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
     start_time = time.time()
@@ -225,7 +226,7 @@ def process_image_task(image_path, output_filename_base, mode, sid):
             final_image = process_single_chunk(image, 0, 0, 1, sid)
 
         # Save Result
-        # !!! حفظ كـ JPEG بجودة 95% !!!
+        # حفظ كـ JPEG بجودة 95%
         output_filename = f"{output_filename_base}_cleaned.jpg" 
         final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
         
