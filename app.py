@@ -27,7 +27,7 @@ UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-MAX_SPLIT_HEIGHT = 15000  # الارتفاع الأقصى قبل التقسيم
+MAX_SPLIT_HEIGHT = 10000  # الارتفاع الأقصى قبل التقسيم
 SPLIT_OVERLAP = 50       # التداخل بين الأجزاء
 
 # --- نقاط نهاية Roboflow ---
@@ -88,61 +88,57 @@ def get_bounding_box(polygon_np):
     y_coords = polygon_np[:, 1]
     return np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)
 
-def expand_polygon_bbox(polygon_pts, image_shape, expansion_factor=0.25):
+def is_monochrome_text_area(image, text_polygon_pts, brightness_threshold=190, std_dev_threshold=30, color_diff_threshold=15):
     """
-    *** دالة جديدة: توسيع المربع المحيط حول المضلع بنسبة مئوية (25%) ***
-    """
-    h_img, w_img = image_shape[:2]
-    
-    # 1. حساب المربع المحيط الأصلي
-    x_min, y_min, x_max, y_max = get_bounding_box(polygon_pts)
-    
-    width = x_max - x_min
-    height = y_max - y_min
-    
-    # 2. حساب قيمة التوسيع
-    # نأخذ أكبر قيمة للبعد (عرض أو ارتفاع) لحساب الهامش لتوسيع موحد
-    margin_x = int(width * expansion_factor)
-    margin_y = int(height * expansion_factor)
-    
-    # 3. تطبيق التوسيع مع التأكد من البقاء داخل حدود الصورة
-    x_min_exp = max(0, x_min - margin_x)
-    y_min_exp = max(0, y_min - margin_y)
-    x_max_exp = min(w_img, x_max + margin_x)
-    y_max_exp = min(h_img, y_max + margin_y)
-    
-    # 4. بناء مضلع مستطيل جديد يغطي المنطقة الموسعة
-    expanded_bbox_polygon = np.array([
-        [x_min_exp, y_min_exp],
-        [x_max_exp, y_min_exp],
-        [x_max_exp, y_max_exp],
-        [x_min_exp, y_max_exp]
-    ], dtype=np.int32)
-    
-    return expanded_bbox_polygon
-
-
-def is_background_white(image, text_polygon_pts, threshold=190):
-    """
-    Checks if the area *around* the text polygon is mostly white/bright.
-    *** التعديل: يتم الآن فحص المنطقة الموسعة حول النص بنسبة 25% ***
+    دالة التحقق: تتأكد من أن المنطقة المحددة للنص تحتوي فقط على الأبيض والأسود باستخدام شكل المضلع (Polygon).
+    *** التعديل: استخدام القناع (Mask) لضمان فحص البكسلات داخل المضلع فقط. ***
     """
     try:
-        # 1. توسيع منطقة فحص النص بنسبة 25%
-        expanded_polygon = expand_polygon_bbox(text_polygon_pts, image.shape, expansion_factor=0.25)
-        
-        # 2. بناء الـ Mask للمنطقة الموسعة
+        # 1. إنشاء Mask بناءً على شكل المضلع (Polygon)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [expanded_polygon], 255)
+        # ملء القناع بشكل المضلع
+        cv2.fillPoly(mask, [text_polygon_pts], 255)
         
-        # 3. حساب متوسط السطوع داخل الـ Mask
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        mean_val = cv2.mean(gray, mask=mask)[0]
+        # التأكد من أن المنطقة المحددة ليست صغيرة جداً
+        if np.sum(mask) < 10:
+            return False
+
+        # 2. التحليل الإحصائي باستخدام الـ Mask
         
-        return mean_val > threshold
+        # 2a. Mean & STD DEV (Brightness and Contrast)
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # حساب المتوسط والانحراف المعياري باستخدام القناع (Mask)
+        mean_val, std_dev_array = cv2.meanStdDev(gray_image, mask=mask)
+        mean_val = mean_val[0][0]
+        std_dev = std_dev_array[0][0]
+
+        # 2b. Color Purity Check (التحقق من عدم وجود ألوان غير الرمادي/الأبيض/الأسود)
+        b_channel, g_channel, r_channel = cv2.split(image)
+        
+        # استخراج القيم المفلترة بواسطة الـ Mask (فقط البكسلات داخل المضلع)
+        b_masked = b_channel[mask == 255]
+        g_masked = g_channel[mask == 255]
+        r_masked = r_channel[mask == 255]
+
+        # حساب أقصى فرق بين قنوات B, G, R داخل المنطقة المحددة فقط
+        max_bgr_diff = np.max([
+            np.max(np.abs(b_masked.astype(np.int32) - g_masked.astype(np.int32))),
+            np.max(np.abs(b_masked.astype(np.int32) - r_masked.astype(np.int32))),
+            np.max(np.abs(g_masked.astype(np.int32) - r_masked.astype(np.int32)))
+        ]) if b_masked.size > 0 else 0
+
+        # 3. اتخاذ القرار
+        is_light = mean_val > brightness_threshold       # يجب أن تكون الخلفية فاتحة (>190)
+        has_contrast = std_dev > std_dev_threshold       # يجب أن يحتوي على تباين (>30)
+        is_monochrome = max_bgr_diff < color_diff_threshold # يجب أن يكون أحادي اللون (<15)
+        
+        # التبييض فقط إذا كانت الشروط الثلاثة متحققة
+        return is_light and is_monochrome and has_contrast
+    
     except Exception as e:
-        print(f"Error in is_background_white check: {e}")
-        return False # الافتراض هو الفشل إذا حدث خطأ
+        print(f"Error in is_monochrome_text_area check: {e}")
+        return False
 
 def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
     """
@@ -173,7 +169,7 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
             bubble_polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in bubble_points], dtype=np.int32)
             x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
 
-            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص مع هامش موسع (20 بكسل)
+            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص مع هامش موسع (20 بكسل) - لم يتغير هذا الهامش
             EXPANSION_MARGIN = 20
             
             x_min_exp = max(0, x_min - EXPANSION_MARGIN)
@@ -203,9 +199,9 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
                     text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min_exp, int(p["y"]) + y_min_exp] 
                                                         for p in text_points], dtype=np.int32)
                     
-                    # التحقق من بياض الخلفية باستخدام المنطقة الموسعة (25%)
-                    if is_background_white(image_chunk, text_polygon_chunk_coords):
-                        # نستخدم المضلع الأصلي للنص (text_polygon_chunk_coords) لعملية التبييض نفسها
+                    # التحقق باستخدام شكل المضلع نفسه
+                    if is_monochrome_text_area(image_chunk, text_polygon_chunk_coords):
+                        # نستخدم المضلع الأصلي للنص لعملية التبييض
                         cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
                         whitened_count += 1
             
@@ -220,9 +216,8 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
         print(f"⚠️ Error processing chunk {chunk_index}: {e}")
         return image_chunk
 
-# --- Main Processing Task (كما هو منطق التقسيم) ---
+# --- Main Processing Task (كما هو) ---
 def process_image_task(image_path, output_filename_base, mode, sid):
-    # ... (باقي الدالة لم يتم تعديلها لأن التغيير كان في دالة is_background_white وتوابعها) ...
     print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
     start_time = time.time()
     final_output_path = ""
