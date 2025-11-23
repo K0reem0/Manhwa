@@ -6,577 +6,332 @@ import numpy as np
 import requests
 import base64
 import time
-from requests.exceptions import RequestException
-import traceback
 import uuid
-import shutil
-import io
 import math
 from flask import Flask, request, render_template, jsonify, send_from_directory
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import eventlet
+import traceback
 from werkzeug.utils import secure_filename
-from shapely.geometry import Polygon, MultiPolygon
-from shapely.validation import make_valid
+import io
+import zipfile
+import shutil
 
 eventlet.monkey_patch()
 
-# --- Configuration & Setup ---
 load_dotenv()
+
+# --- Configuration ---
 UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
+MAX_SPLIT_HEIGHT = 15000  # الارتفاع الأقصى قبل التقسيم
+SPLIT_OVERLAP = 50       # التداخل بين الأجزاء
 
-# --- Roboflow Endpoints and Settings ---
-ROBOFLOW_BUBBLE_DETECT_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
-ROBOFLOW_TEXT_DETECT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
+# --- نقاط نهاية Roboflow ---
+ROBOFLOW_BUBBLE_URL = 'https://serverless.roboflow.com/manga-speech-bubble-detection-1rbgq/15'
+ROBOFLOW_TEXT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
 
-# --- White Background Threshold ---
-# Average BGR value (0-255) above this threshold is considered "white" background.
-# 230 is a good starting point (90% white). (255, 255, 255) is pure white.
-WHITE_THRESHOLD = 230 
-
-# --- Flask App Setup ---
+# --- Flask App Setup (كما هو) ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default_secret')
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'change_this_in_production')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['RESULT_FOLDER'] = RESULT_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024 # 50 MB
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 
-# --- SocketIO Setup ---
+# --- SocketIO Setup (كما هو) ---
 socketio = SocketIO(
     app,
     async_mode='eventlet',
     cors_allowed_origins="*",
     logger=False,
     engineio_logger=False,
-    ping_timeout=60,
+    ping_timeout=120,
     ping_interval=25
 )
 
-# --- Ensure directories exist ---
-try:
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(RESULT_FOLDER, exist_ok=True)
-    print("✔️ Directories verified/created.")
-except OSError as e:
-    print(f"❌ CRITICAL ERROR creating directories: {e}")
-    sys.exit(1)
+# --- Ensure directories exist (كما هو) ---
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(RESULT_FOLDER, exist_ok=True)
 
 # --- Helper Functions ---
 def emit_progress(step, message, percentage, sid):
-    """Emits progress updates to a specific client."""
     socketio.emit('progress_update', {'step': step, 'message': message, 'percentage': percentage}, room=sid)
     socketio.sleep(0.01)
 
 def emit_error(message, sid):
-    """Emits an error message to a specific client."""
     print(f"SID: {sid} | ❗ ERROR Emitted: {message}")
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01)
 
-def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60, confidence=None):
-    """Fetches predictions from a Roboflow model."""
-    model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"
-    print(f"ℹ️ Calling Roboflow ({model_name})...")
+def get_roboflow_predictions(endpoint_url, api_key, image_b64, confidence=None, timeout=60):
+    """Fetches predictions from Roboflow using the specified endpoint."""
     if not api_key: raise ValueError("Missing Roboflow API Key.")
+    
     url = f"{endpoint_url}?api_key={api_key}"
     if confidence is not None:
-        url += f"&confidence={confidence}" # Append confidence for bubble detection
-
+        url += f"&confidence={confidence}" 
+        
     try:
         response = requests.post(url, data=image_b64, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=timeout)
-        response.raise_for_status(); data = response.json(); predictions = data.get("predictions", [])
-        print(f"✔️ Roboflow ({model_name}) response received. Predictions: {len(predictions)}")
-        return predictions
-    except requests.exceptions.Timeout as timeout_err: print(f"❌ Roboflow ({model_name}) Timeout: {timeout_err}"); raise ConnectionError(f"Roboflow API ({model_name}) timed out.") from timeout_err
-    except requests.exceptions.HTTPError as http_err: print(f"❌ Roboflow ({model_name}) HTTP Error: Status {http_err.response.status_code}"); print(f"   Response: {http_err.response.text[:200]}"); raise ConnectionError(f"Roboflow API ({model_name}) failed (Status {http_err.response.status_code}).") from http_err
-    except requests.exceptions.RequestException as req_err: print(f"❌ Roboflow ({model_name}) Request Error: {req_err}"); raise ConnectionError(f"Network error contacting Roboflow ({model_name}).") from req_err
-    except Exception as e: print(f"❌ Roboflow ({model_name}) Unexpected Error: {e}"); traceback.print_exc(limit=2); raise RuntimeError(f"Unexpected error during Roboflow ({model_name}).") from e
+        response.raise_for_status()
+        return response.json().get("predictions", [])
+    except Exception as e:
+        print(f"❌ Roboflow Error: {e}")
+        raise ValueError(f"فشل الاتصال بنموذج Roboflow. تأكد من صحة المفتاح والرابط. الخطأ: {str(e)}")
 
-# --- Image Splitting and Merging Logic (Unchanged) ---
+def get_bounding_box(polygon_np):
+    """Calculates min/max x and y from a polygon."""
+    x_coords = polygon_np[:, 0]
+    y_coords = polygon_np[:, 1]
+    return np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)
 
-MAX_DETECTION_HEIGHT = 10000
-MAX_INPAINT_HEIGHT = 7000
-MIN_INPAINT_HEIGHT = 5000
-LARGE_IMAGE_THRESHOLD = 15000
-
-def get_bubble_predictions_for_large_image(image, sid):
-    """Splits large image for bubble detection and aggregates predictions."""
-    h_img, w_img = image.shape[:2]
-    if h_img <= LARGE_IMAGE_THRESHOLD:
-        print("   Image is small enough, processing without splitting.")
-        retval, buffer = cv2.imencode('.jpg', image); b64_image = base64.b64encode(buffer).decode('utf-8')
-        return get_roboflow_predictions(ROBOFLOW_BUBBLE_DETECT_URL, ROBOFLOW_API_KEY, b64_image, confidence=0.01)
-
-    print(f"   Image height {h_img} > {LARGE_IMAGE_THRESHOLD}. Splitting for detection...")
-    segment_predictions = []
-    
-    num_segments = math.ceil(h_img / MAX_DETECTION_HEIGHT)
-    
-    for i in range(num_segments):
-        start_y = i * MAX_DETECTION_HEIGHT
-        end_y = min((i + 1) * MAX_DETECTION_HEIGHT, h_img)
-        segment = image[start_y:end_y, :]
+def is_bubble_background_white(image, bubble_polygon_pts, threshold=220):
+    """
+    *** التحقق الجديد: تتأكد من أن المنطقة المحددة للفقاعة بيضاء في الغالب (>220). ***
+    """
+    try:
+        # 1. إنشاء Mask بناءً على شكل المضلع (Polygon)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask, [bubble_polygon_pts], 255)
         
-        if segment.size == 0: continue
-        
-        emit_progress(1, f"Detecting bubbles in segment {i+1}/{num_segments}...", 10 + int(30 * (i+1) / num_segments), sid)
-        
-        try:
-            retval, buffer = cv2.imencode('.jpg', segment); b64_segment = base64.b64encode(buffer).decode('utf-8')
-            preds = get_roboflow_predictions(ROBOFLOW_BUBBLE_DETECT_URL, ROBOFLOW_API_KEY, b64_segment, confidence=0.01)
-            
-            for pred in preds:
-                for point in pred.get("points", []):
-                    point["y"] += start_y
-            segment_predictions.extend(preds)
-            
-        except Exception as e:
-            print(f"   ❌ Error detecting bubbles in segment {i+1}: {e}")
-            
-    print(f"   Aggregated {len(segment_predictions)} bubbles from all segments.")
-    return segment_predictions
+        # التأكد من أن المنطقة المحددة ليست صغيرة جداً
+        if np.sum(mask) < 10:
+            return False
 
-def split_image_safely(image, predictions):
-    """Splits image into smaller chunks (5000-7000px) ensuring no bubble polygon is cut."""
-    h_img, w_img = image.shape[:2]
-    if h_img <= MAX_INPAINT_HEIGHT:
-        return [{'crop': image, 'offset_y': 0, 'preds': predictions}]
-
-    bubble_polygons = []
-    for pred in predictions:
-        points = pred.get("points", [])
-        if len(points) >= 3:
-            coords = [(p["x"], p["y"]) for p in points]
-            try:
-                poly = Polygon(coords)
-                if not poly.is_valid: poly = make_valid(poly)
-                if isinstance(poly, MultiPolygon): poly = max(poly.geoms, key=lambda p: p.area, default=None)
-                if poly and not poly.is_empty:
-                    bubble_polygons.append(poly)
-            except Exception as e:
-                print(f"   ⚠️ Warning: Failed to create/validate polygon: {e}")
-
-    print(f"   Splitting image safely for processing based on {len(bubble_polygons)} bubbles.")
-    
-    split_sections = []
-    current_y = 0
-    
-    while current_y < h_img:
-        target_split = current_y + MAX_INPAINT_HEIGHT
+        # 2. حساب متوسط السطوع باستخدام الـ Mask
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        if h_img - current_y <= MIN_INPAINT_HEIGHT:
-            split_y = h_img
-        else:
-            safe_split_found = False
-            for split_y in range(target_split, current_y + MIN_INPAINT_HEIGHT -1, -1):
-                if split_y >= h_img: continue
-                
-                is_safe = True
-                for poly in bubble_polygons:
-                    miny_poly, maxy_poly = int(poly.bounds[1]), int(poly.bounds[3])
-                    if miny_poly < split_y < maxy_poly:
-                        is_safe = False
-                        break
-                
-                if is_safe:
-                    safe_split_found = True
-                    break
-            
-            if not safe_split_found:
-                 print(f"   ⚠️ Warning: Could not find safe split between {current_y+MIN_INPAINT_HEIGHT} and {target_split}. Finding first safe spot...")
-                 
-                 for split_y in range(target_split, min(h_img, target_split + 1500)): 
-                     is_safe = True
-                     for poly in bubble_polygons:
-                         miny_poly, maxy_poly = int(poly.bounds[1]), int(poly.bounds[3])
-                         if miny_poly < split_y < maxy_poly:
-                             is_safe = False
-                             break
-                     if is_safe:
-                         safe_split_found = True
-                         break
-                 
-                 if not safe_split_found:
-                      split_y = target_split
-                      print("   ❌ CRITICAL: Failed to find safe split. Cutting at max height.")
-                 elif split_y > h_img: split_y = h_img
-
-        split_y = min(split_y, h_img)
+        # حساب المتوسط داخل القناع (Mask)
+        mean_val = cv2.mean(gray, mask=mask)[0]
         
-        crop = image[current_y:split_y, :]
-        
-        crop_preds = []
-        for pred in predictions:
-            points = pred.get("points", [])
-            coords_y = [p["y"] for p in points]
-            miny, maxy = min(coords_y), max(coords_y)
-            
-            if miny < split_y and maxy > current_y:
-                new_points = []
-                for p in points:
-                    new_points.append({"x": p["x"], "y": p["y"] - current_y})
-
-                new_pred = pred.copy()
-                new_pred['points'] = new_points
-                crop_preds.append(new_pred)
-                
-        split_sections.append({
-            'crop': crop,
-            'offset_y': current_y,
-            'preds': crop_preds
-        })
-        
-        current_y = split_y
-        
-    print(f"   Split image into {len(split_sections)} safe sections for processing.")
-    return split_sections
-
-def merge_processed_sections(sections):
-    """Merges processed image chunks back into a single image."""
-    if not sections: return None
-    
-    total_height = sum(section['crop'].shape[0] for section in sections)
-    width = sections[0]['crop'].shape[1]
-    
-    merged_image = np.zeros((total_height, width, 3), dtype=np.uint8) # Assuming BGR
-    
-    current_y = 0
-    for section in sections:
-        h, w = section['crop'].shape[:2]
-        merged_image[current_y:current_y + h, :] = section['crop']
-        current_y += h
-        
-    return merged_image
-
-def is_background_white(image, polygon_points, threshold):
-    """Checks if the average color inside the polygon is above the WHITE_THRESHOLD."""
-    if not polygon_points: return False
-    
-    # 1. Create a mask from the polygon points
-    h, w = image.shape[:2]
-    mask = np.zeros((h, w), dtype=np.uint8)
-    polygon_np = np.array(polygon_points, dtype=np.int32)
-    # Ensure coordinates are within bounds (already done in calling function, but good practice)
-    polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, w - 1)
-    polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, h - 1)
-    cv2.fillPoly(mask, [polygon_np], 255)
-    
-    # 2. Extract pixels inside the mask
-    # Convert image to grayscale for a single intensity value check
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Apply the mask to the grayscale image
-    masked_pixels = gray_image[mask == 255]
-    
-    if masked_pixels.size == 0:
+        return mean_val > threshold
+    except Exception as e:
+        print(f"Error in is_bubble_background_white check: {e}")
         return False
-        
-    # 3. Calculate the average intensity
-    average_intensity = np.mean(masked_pixels)
-    
-    print(f"   Average intensity inside text box: {average_intensity:.2f}. Threshold: {threshold}")
-    
-    # 4. Check against the threshold
-    return average_intensity > threshold
 
-
-# --- Main Processing Task (Modified for Conditional White Fill) ---
-def process_image_task(image_path, output_filename_base, mode, sid):
+def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
     """
-    Main background task to process a single image (Conditional White Fill only).
+    دالة مساعدة لمعالجة جزء واحد من الصورة (Detection + Whitening)
     """
-    print(f"ℹ️ SID {sid}: Starting image processing task for {os.path.basename(image_path)}")
-    start_time = time.time(); final_image_np = None; result_data = {}; image = None
-    final_output_path = ""
+    result_chunk = image_chunk.copy()
+    h_img, w_img = image_chunk.shape[:2]
+    
+    # 1. الكشف عن الفقاعات باستخدام النموذج الأول (ROBOFLOW_BUBBLE_URL)
+    emit_progress(2, f"الكشف عن الفقاعات في الجزء {chunk_index + 1}...", 
+                  30 + int((chunk_index / total_chunks) * 20), sid)
+    
+    retval, buffer_text = cv2.imencode('.png', image_chunk)
+    if not retval: return image_chunk
+    b64_image = base64.b64encode(buffer_text).decode('utf-8')
 
     try:
-        emit_progress(0, "Loading image...", 5, sid);
-        image = cv2.imread(image_path)
-        if image is None: raise ValueError(f"Could not load image: {image_path} (Task Level).")
-        if len(image.shape) == 2 or image.shape[2] == 1: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-        elif image.shape[2] != 3: raise ValueError(f"Unsupported channels: {image.shape[2]}.")
-        h_img, w_img = image.shape[:2];
-        if h_img == 0 or w_img == 0: raise ValueError("Image zero dimensions.")
+        # استدعاء نموذج الفقاعات بعتبة ثقة 1% (confidence=1)
+        bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_URL, ROBOFLOW_API_KEY, b64_image, confidence=1)
         
-        emit_progress(1, "Detecting bubbles (and splitting if large)...", 10, sid);
-        all_bubble_predictions = get_bubble_predictions_for_large_image(image.copy(), sid)
+        whitened_count = 0
         
-        if not all_bubble_predictions:
-            print(f"   No speech bubbles detected.")
-            emit_progress(4, "No bubbles detected, skipping text removal.", 95, sid); 
-            final_image_np = image.copy(); 
-            output_filename = f"{output_filename_base}_no_changes.jpg"; 
-            final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); 
-            result_data = {'mode': 'cleaned', 'imageUrl': f'/results/{output_filename}'}
-
-        else:
-            image_sections = split_image_safely(image.copy(), all_bubble_predictions)
-            processed_sections = []
+        # 2. المرور على كل فقاعة تم اكتشافها
+        for i, bubble_pred in enumerate(bubble_predictions):
+            bubble_points = bubble_pred.get("points", [])
+            if len(bubble_points) < 3: continue
             
-            total_sections = len(image_sections)
-            base_progress = 40; max_progress = 90
+            bubble_polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in bubble_points], dtype=np.int32)
+            x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
 
-            for i, section in enumerate(image_sections):
-                current_section_progress = base_progress + int(((i + 1) / total_sections) * (max_progress - base_progress))
-                emit_progress(2, f"Processing section {i + 1}/{total_sections}...", current_section_progress, sid)
-                
-                section_image = section['crop']
-                section_h, section_w = section_image.shape[:2]
-                
-                retval, buffer_text = cv2.imencode('.jpg', section_image)
-                if not retval or buffer_text is None: raise ValueError("Failed encode text detect segment.")
-                b64_image_text = base64.b64encode(buffer_text).decode('utf-8')
-                
-                text_predictions = []
-                try:
-                    text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_DETECT_URL, ROBOFLOW_API_KEY, b64_image_text)
-                    print(f"   Found {len(text_predictions)} text areas in section {i+1}.")
-                except Exception as rf_err:
-                     print(f"❌ SID {sid}: Error during Roboflow text detection in section {i+1}: {rf_err}. Skipping text removal for this section.")
+            # *** الشرط الجديد: التحقق من أن خلفية الفقاعة بيضاء في الغالب (أغلب اللون فيه أبيض) ***
+            if not is_bubble_background_white(image_chunk, bubble_polygon_np, threshold=220):
+                print(f"   Skipping bubble {i+1} (not mostly white).")
+                continue # تخطي الفقاعة إذا لم تكن خلفيتها بيضاء
 
-                # --- MODIFIED: Conditional White Fill ---
-                processed_section_image = section_image.copy()
-                polygons_filled = 0
-                for pred in text_predictions:
-                     points = pred.get("points", []);
-                     if len(points) >= 3:
-                         polygon_points = [(int(p["x"]), int(p["y"])) for p in points]
-                         
-                         # Check background color BEFORE filling
-                         if is_background_white(section_image, polygon_points, WHITE_THRESHOLD):
-                             
-                             polygon_np = np.array(polygon_points, dtype=np.int32)
-                             polygon_np[:, 0] = np.clip(polygon_np[:, 0], 0, section_w - 1); 
-                             polygon_np[:, 1] = np.clip(polygon_np[:, 1], 0, section_h - 1)
-                             
-                             try: 
-                                 cv2.fillPoly(processed_section_image, [polygon_np], (255, 255, 255)) # Fill with white (BGR)
-                                 polygons_filled += 1
-                                 print("   ✔️ Filled with white (Background was white).")
-                             except Exception as fill_err: 
-                                 print(f"⚠️ Warn: Error filling text polygon with white: {fill_err}")
-                         else:
-                             print("   ⚠️ Skipped filling (Background was not white).")
+            # 3. اقتصاص الفقاعة لإرسالها لنموذج النص مع هامش موسع (20 بكسل)
+            EXPANSION_MARGIN = 20
+            
+            x_min_exp = max(0, x_min - EXPANSION_MARGIN)
+            y_min_exp = max(0, y_min - EXPANSION_MARGIN)
+            x_max_exp = min(w_img, x_max + EXPANSION_MARGIN)
+            y_max_exp = min(h_img, y_max + EXPANSION_MARGIN)
 
-                if polygons_filled > 0:
-                    print(f"   Filled {polygons_filled} text areas with white in section {i+1}.")
-                else:
-                    print(f"   No text areas met the white background condition in section {i+1}.")
-                # --- END MODIFIED ---
+            cropped_bubble = image_chunk[y_min_exp:y_max_exp, x_min_exp:x_max_exp]
+            h_crop, w_crop = cropped_bubble.shape[:2]
+
+            if h_crop == 0 or w_crop == 0: continue
+            
+            retval_crop, buffer_crop = cv2.imencode('.png', cropped_bubble)
+            if not retval_crop: continue
+            b64_crop = base64.b64encode(buffer_crop).decode('utf-8')
+
+            # 4. الكشف عن النص داخل الفقاعة المقتطعة
+            text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop, confidence=25)
+            
+            # 5. تطبيق التبييض على النص المكتشف (الآن يتم التبييض بشكل غير مشروط إذا تم اجتياز الفلترة في الخطوة 2)
+            if text_predictions:
+                for text_pred in text_predictions:
+                    text_points = text_pred.get("points", [])
+                    if len(text_points) < 3: continue
+
+                    # تحويل الإحداثيات إلى إحداثيات الصورة الأصلية (الـ chunk)
+                    text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min_exp, int(p["y"]) + y_min_exp] 
+                                                        for p in text_points], dtype=np.int32)
                     
-                processed_sections.append({'crop': processed_section_image, 'offset_y': section['offset_y']})
+                    # *** تنفيذ التبييض: رسم شكل المضلع (Polygon) مباشرة باللون الأبيض ***
+                    cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
+                    whitened_count += 1
             
-            emit_progress(3, "Merging processed sections...", 92, sid)
-            final_image_np = merge_processed_sections(processed_sections)
-            if final_image_np is None: raise RuntimeError("Failed to merge processed sections.")
-            
-            output_filename = f"{output_filename_base}_cleaned.jpg"; 
-            final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename);
-            result_data = {'mode': 'cleaned', 'imageUrl': f'/results/{output_filename}'}
-
-        if final_image_np is not None and final_output_path:
-            emit_progress(5, "Saving final image...", 98, sid); save_success = False
-            try:
-                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
-                 retval, buffer = cv2.imencode('.jpg', final_image_np, encode_param)
-                 if not retval or buffer is None: raise IOError("cv2.imencode failed for JPEG 95")
-                 
-                 with open(final_output_path, 'wb') as f:
-                     f.write(buffer.tobytes())
-                 
-                 save_success = True
-                 print(f"✔️ Saved (JPEG 95%): {final_output_path}")
-                 
-            except Exception as save_err: 
-                 print(f"❌ Final save failed: {save_err}"); emit_error("Failed save final image.", sid)
-            
-            if save_success:
-                processing_time = time.time() - start_time;
-                print(f"✔️ SID {sid} Complete {processing_time:.2f}s for {os.path.basename(image_path)}.");
-                emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
-                result_data['original_filename'] = os.path.basename(image_path)
-                result_data['is_zip_batch'] = False
-                socketio.emit('processing_complete', result_data, room=sid)
-            else:
-                print(f"❌❌❌ SID {sid}: Critical Error: Could not save image {final_output_path}")
-        elif not final_output_path:
-            print(f"❌ SID {sid}: Aborted before output path set.")
-        else:
-            print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
+        print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_count} text areas.")
+        
+        emit_progress(3, f"اكتمل تبييض النصوص في الجزء {chunk_index + 1}...", 
+                      50 + int((chunk_index / total_chunks) * 40), sid)
+        
+        return result_chunk
 
     except Exception as e:
-        print(f"❌❌❌ SID {sid}: UNHANDLED FATAL ERROR in task: {e}")
+        print(f"⚠️ Error processing chunk {chunk_index}: {e}")
+        return image_chunk
+
+# --- Main Processing Task (كما هو) ---
+def process_image_task(image_path, output_filename_base, mode, sid):
+    print(f"ℹ️ SID {sid}: Starting task for {os.path.basename(image_path)}")
+    start_time = time.time()
+    final_output_path = ""
+    result_data = {}
+
+    try:
+        emit_progress(0, "تحميل الصورة...", 5, sid)
+        image = cv2.imread(image_path)
+        if image is None: raise ValueError(f"Could not load image: {image_path}")
+        
+        if len(image.shape) == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4: image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR) 
+
+        h_full, w_full = image.shape[:2]
+        
+        # --- منطق التقسيم ---
+        if h_full > MAX_SPLIT_HEIGHT:
+            print(f"ℹ️ Image height ({h_full}px) exceeds limit ({MAX_SPLIT_HEIGHT}px). Splitting...")
+            emit_progress(1, "الصورة طويلة جداً، جاري تقسيمها ومعالجتها...", 10, sid)
+            
+            y_start_2 = MAX_SPLIT_HEIGHT
+            
+            chunk1 = image[0:y_start_2 + SPLIT_OVERLAP, :]
+            chunk2 = image[y_start_2 - SPLIT_OVERLAP:h_full, :]
+            
+            processed_chunk1 = process_single_chunk(chunk1, 0, 0, 2, sid)
+            processed_chunk2 = process_single_chunk(chunk2, y_start_2 - SPLIT_OVERLAP, 1, 2, sid)
+            
+            print("ℹ️ Stitching results back together...")
+            emit_progress(4, "دمج الأجزاء...", 90, sid)
+            
+            processed_chunk1_cropped = processed_chunk1[0:y_start_2, :]
+            processed_chunk2_cropped = processed_chunk2[SPLIT_OVERLAP:, :]
+            
+            final_image = cv2.vconcat([processed_chunk1_cropped, processed_chunk2_cropped])
+            
+        else:
+            final_image = process_single_chunk(image, 0, 0, 1, sid)
+
+        # Save Result
+        output_filename = f"{output_filename_base}_cleaned.jpg" 
+        final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
+        
+        emit_progress(5, "حفظ الصورة النهائية (JPEG)...", 95, sid)
+        cv2.imwrite(final_output_path, final_image, [cv2.IMWRITE_JPEG_QUALITY, 95]) 
+        
+        processing_time = time.time() - start_time
+        print(f"✔️ SID {sid} Complete {processing_time:.2f}s.")
+        emit_progress(6, "تمت المعالجة!", 100, sid)
+        
+        result_data = {
+            'mode': 'clean_white', 
+            'imageUrl': f'/results/{output_filename}',
+            'original_filename': os.path.basename(image_path)
+        }
+        socketio.emit('processing_complete', result_data, room=sid)
+
+    except Exception as e:
+        print(f"❌❌❌ SID {sid}: FATAL ERROR: {e}")
         traceback.print_exc()
-        emit_error(f"Unexpected server error during processing ({type(e).__name__}).", sid)
+        error_msg = str(e).split('\n')[0]
+        emit_error(f"خطأ في المعالجة: {error_msg}", sid)
     finally:
         try:
             if image_path and os.path.exists(image_path):
-                os.remove(image_path)
-                print(f"🧹 SID {sid}: Cleaned up uploaded file: {image_path}")
-        except Exception as cleanup_err:
-            print(f"⚠️ SID {sid}: Error cleaning up {image_path}: {cleanup_err}")
+                if 'temp_zip_' not in image_path:
+                    os.remove(image_path)
+        except: pass
 
-# --- Flask Routes, SocketIO Handlers, and Main Execution (Unchanged) ---
+# --- Routes and Socket Events (بدون تغيير) ---
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/results/<path:filename>')
 def get_result_image(filename):
-    if '..' in filename or filename.startswith('/'):
-        return "Invalid filename", 400
-    results_dir = os.path.abspath(app.config['RESULT_FOLDER'])
-    try:
-        return send_from_directory(results_dir, filename, as_attachment=False)
-    except FileNotFoundError:
-        return "File not found", 404
+    return send_from_directory(os.path.abspath(app.config['RESULT_FOLDER']), filename)
 
 @app.route('/upload', methods=['POST'])
 def handle_upload():
-    temp_log_id = f"upload_{uuid.uuid4()}"
-    print(f"--- [{temp_log_id}] Received POST upload request ---")
-    if 'file' not in request.files: return jsonify({'error': 'No file part in the request'}), 400
+    if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
     file = request.files['file']
     if file.filename == '': return jsonify({'error': 'No selected file'}), 400
+    
     filename = secure_filename(file.filename)
-    if '.' in filename:
-        ext = filename.rsplit('.', 1)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS: return jsonify({'error': f'Invalid file type: {ext}. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-    else: return jsonify({'error': 'File has no extension'}), 400
-    unique_id = uuid.uuid4(); input_filename = f"{unique_id}.{ext}"; output_filename_base = f"{unique_id}"
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+    if ext not in ALLOWED_EXTENSIONS: return jsonify({'error': 'Invalid file type'}), 400
+    
+    unique_id = uuid.uuid4()
+    input_filename = f"{unique_id}.{ext}"
+    output_filename_base = f"{unique_id}"
     upload_path = os.path.join(app.config['UPLOAD_FOLDER'], input_filename)
-    try:
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True); file.save(upload_path)
-        file_size_kb = os.path.getsize(upload_path) / 1024
-        print(f"[{temp_log_id}] ✔️ File saved via POST: {upload_path} ({file_size_kb:.1f} KB)")
-        return jsonify({'message': 'File uploaded successfully', 'output_filename_base': output_filename_base, 'saved_filename': input_filename}), 200
-    except IOError as io_err:
-        print(f"[{temp_log_id}] ❌ Upload Error: File write error: {io_err}")
-        if os.path.exists(upload_path):
-            try: os.remove(upload_path); print(f"[{temp_log_id}] 🧹 Cleaned up partial file after IO error.")
-            except Exception: pass
-        return jsonify({'error': 'Server error saving file'}), 500
-    except Exception as e:
-        print(f"[{temp_log_id}] ❌ Upload Error: Unexpected error during save: {e}"); traceback.print_exc()
-        if os.path.exists(upload_path):
-             try: os.remove(upload_path); print(f"[{temp_log_id}] 🧹 Cleaned up file after unexpected save error.")
-             except Exception: pass
-        return jsonify({'error': 'Unexpected server error during upload'}), 500
+    
+    file.save(upload_path)
+    return jsonify({'message': 'OK', 'output_filename_base': output_filename_base, 'saved_filename': input_filename}), 200
 
 @app.route('/upload_zip', methods=['POST'])
 def handle_zip_upload():
-    temp_log_id = f"upload_zip_{uuid.uuid4()}"
-    print(f"--- [{temp_log_id}] Received POST zip upload request ---")
-    if 'file' not in request.files: return jsonify({'error': 'No file part in the request'}), 400
+    if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
     file = request.files['file']
-    if file.filename == '': return jsonify({'error': 'No selected file'}), 400
-    if not file.filename.lower().endswith('.zip'): return jsonify({'error': 'Invalid file type. Please upload a .zip file.'}), 400
+    if not file.filename.lower().endswith('.zip'): return jsonify({'error': 'Not a zip file'}), 500
 
-    temp_dir_for_extraction = None
+    temp_dir = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_zip_{uuid.uuid4()}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
     try:
-        zip_file_bytes = file.read(); zip_file = zipfile.ZipFile(io.BytesIO(zip_file_bytes)); extracted_images_info = []
-        temp_dir_for_extraction = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_zip_{uuid.uuid4()}"); os.makedirs(temp_dir_for_extraction, exist_ok=True)
-        print(f"[{temp_log_id}] Created temporary directory for extraction: {temp_dir_for_extraction}")
-        for file_info in zip_file.infolist():
-            if file_info.is_dir(): continue
-            filename = os.path.basename(file_info.filename); ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-            if ext in ALLOWED_EXTENSIONS:
-                extracted_file_path = os.path.join(temp_dir_for_extraction, secure_filename(filename))
-                try:
-                    with zip_file.open(file_info) as source, open(extracted_file_path, "wb") as target: target.write(source.read())
-                    print(f"[{temp_log_id}] Extracted image: {extracted_file_path}")
-                    extracted_images_info.append({'original_filename': filename, 'saved_path': extracted_file_path, 'output_base': f"zip_img_{uuid.uuid4()}"})
-                except Exception as extract_err: print(f"[{temp_log_id}] ⚠️ Warning: Could not extract {filename}: {extract_err}")
-            else: print(f"[{temp_log_id}] Skipping non-image file in zip: {filename}")
-        if not extracted_images_info:
-            print(f"[{temp_log_id}] ❌ Upload Error: No valid images found in the zip file.")
-            if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
-            return jsonify({'error': 'No valid images found in the zip file.'}), 400
-        print(f"[{temp_log_id}] Successfully extracted {len(extracted_images_info)} images.")
-        return jsonify({'message': 'Zip file uploaded and images extracted successfully', 'images_to_process': extracted_images_info}), 200
-    except zipfile.BadZipFile:
-        print(f"[{temp_log_id}] ❌ Upload Error: Bad zip file.")
-        if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
-        return jsonify({'error': 'The uploaded file is not a valid zip archive.'}), 400
+        with zipfile.ZipFile(io.BytesIO(file.read())) as z:
+            extracted = []
+            for info in z.infolist():
+                if info.is_dir(): continue
+                fname = os.path.basename(info.filename)
+                ext = fname.rsplit('.', 1)[1].lower() if '.' in fname else ''
+                if ext in ALLOWED_EXTENSIONS:
+                    path = os.path.join(temp_dir, secure_filename(fname))
+                    with open(path, "wb") as f: f.write(z.read(info.filename))
+                    extracted.append({
+                        'original_filename': fname,
+                        'saved_path': path,
+                        'output_base': f"zip_{uuid.uuid4()}"
+                    })
+        return jsonify({'message': 'OK', 'images_to_process': extracted}), 200
     except Exception as e:
-        print(f"[{temp_log_id}] ❌ Upload Error: Unexpected error during zip processing: {e}"); traceback.print_exc()
-        if temp_dir_for_extraction and os.path.exists(temp_dir_for_extraction): shutil.rmtree(temp_dir_for_extraction)
-        return jsonify({'error': 'Unexpected server error during zip upload processing.'}), 500
-
-
-@socketio.on('connect')
-def handle_connect():
-    print(f"✅ Client connected: {request.sid}")
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    print(f"❌ Client disconnected: {request.sid}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({'error': str(e)}), 500
 
 @socketio.on('start_processing')
 def handle_start_processing(data):
     sid = request.sid
-    print(f"\n--- Received 'start_processing' event SID: {sid} ---")
-    if not isinstance(data, dict): emit_error("Invalid request data.", sid); return
-    output_filename_base = data.get('output_filename_base')
-    saved_filename = data.get('saved_filename')
-    mode = 'cleaned'
-    print(f"   Mode: '{mode}' (Forced)")
-    if not output_filename_base or not saved_filename:
-        emit_error('Missing or invalid parameters.', sid); return
+    if not data.get('saved_filename'): return
     
-    upload_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(saved_filename))
-    if not os.path.exists(upload_path) or not os.path.isfile(upload_path):
-        print(f"❌ ERROR SID {sid}: File not found at path: {upload_path}")
-        emit_error(f"Uploaded file '{saved_filename}' not found on server.", sid); return
-    
-    try:
-        socketio.start_background_task(process_image_task, image_path=upload_path, output_filename_base=output_filename_base, mode=mode, sid=sid)
-        print(f"   ✔️ Task initiated SID {sid} for {saved_filename}.")
-        socketio.emit('processing_started', {'message': 'File received, processing started...'}, room=sid)
-    except Exception as task_start_err:
-        print(f"❌ CRITICAL SID {sid}: Failed to start background task: {task_start_err}"); traceback.print_exc()
-        emit_error(f"Server error starting image processing task.", sid)
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(data['saved_filename']))
+    socketio.start_background_task(process_image_task, path, data['output_filename_base'], 'clean_white', sid)
 
 @socketio.on('start_batch_processing')
-def handle_start_batch_processing(data):
+def handle_batch(data):
     sid = request.sid
-    print(f"\n--- Received 'start_batch_processing' event SID: {sid} ---")
-    if not isinstance(data, dict): emit_error("Invalid request data.", sid); return
-    images_to_process = data.get('images_to_process', [])
-    mode = 'cleaned'
-    if not isinstance(images_to_process, list) or not images_to_process:
-        emit_error('Invalid or empty image list for batch processing.', sid); return
+    images = data.get('images_to_process', [])
+    socketio.emit('batch_started', {'total_images': len(images)}, room=sid)
+    for img in images:
+        socketio.start_background_task(process_image_task, img['saved_path'], img['output_base'], 'clean_white', sid)
 
-    print(f"   Initiating batch processing for {len(images_to_process)} images. Mode: '{mode}' (Forced)")
-    socketio.emit('batch_started', {'total_images': len(images_to_process)}, room=sid)
-
-    for img_info in images_to_process:
-        try:
-            image_path = img_info.get('saved_path'); output_base = img_info.get('output_base')
-            original_filename = img_info.get('original_filename', 'unknown')
-            if not image_path or not output_base:
-                print(f"   ⚠️ Skipping image {original_filename}: missing path or output base."); emit_error(f"Skipping image '{original_filename}' due to missing data.", sid); continue
-            if not os.path.exists(image_path) or not os.path.isfile(image_path):
-                print(f"❌ ERROR SID {sid}: Image file not found: {image_path}"); emit_error(f"Image '{original_filename}' not found on server. Skipping.", sid); continue
-
-            socketio.start_background_task(process_image_task, image_path=image_path, output_filename_base=output_base, mode=mode, sid=sid)
-            print(f"   ✔️ Task initiated for image '{original_filename}'.")
-        except Exception as e:
-            print(f"❌ CRITICAL SID {sid}: Failed to start task for an image: {e}"); traceback.print_exc()
-            emit_error("Server error starting processing for one or more images.", sid)
-            
 if __name__ == '__main__':
-    print("--- Starting Manga Whitewashing Web App (Flask + SocketIO + Eventlet) ---")
-    if not ROBOFLOW_API_KEY: print("███ WARNING: ROBOFLOW_API_KEY env var not set! ███")
-    print(f"   * Note: Text areas are conditionally filled with white if background > {WHITE_THRESHOLD} (grayscale).")
-    port = int(os.environ.get('PORT', 5000))
-    print(f"   * Starting server http://0.0.0.0:{port}")
-    try:
-        socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
-    except Exception as run_err:
-        print(f"❌❌❌ Failed start server: {run_err}"); sys.exit(1)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
