@@ -88,28 +88,45 @@ def get_bounding_box(polygon_np):
     y_coords = polygon_np[:, 1]
     return np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)
 
-def is_bubble_background_white(image, bubble_polygon_pts, threshold=220):
+def is_sufficiently_white(image, text_polygon_pts, white_ratio_threshold=0.25, white_pixel_val=240):
     """
-    *** التحقق الجديد: تتأكد من أن المنطقة المحددة للفقاعة بيضاء في الغالب (>220). ***
+    *** التحقق الجديد: تتأكد من أن نسبة اللون الأبيض في المنطقة المحيطة بالنص (المربع المحيط) لا تقل عن 25%. ***
     """
     try:
-        # 1. إنشاء Mask بناءً على شكل المضلع (Polygon)
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [bubble_polygon_pts], 255)
+        # 1. الحصول على المربع المحيط (Bounding Box) للنص المكتشف
+        x_min, y_min, x_max, y_max = get_bounding_box(text_polygon_pts)
         
-        # التأكد من أن المنطقة المحددة ليست صغيرة جداً
-        if np.sum(mask) < 10:
+        # التأكد من أن الإحداثيات داخل حدود الصورة
+        h_img, w_img = image.shape[:2]
+        x_min = max(0, x_min)
+        y_min = max(0, y_min)
+        x_max = min(w_img, x_max)
+        y_max = min(h_img, y_max)
+        
+        cropped_area = image[y_min:y_max, x_min:x_max]
+
+        if cropped_area.size == 0:
             return False
 
-        # 2. حساب متوسط السطوع باستخدام الـ Mask
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # 2. التحويل إلى تدرج رمادي للتحقق من السطوع
+        gray_area = cv2.cvtColor(cropped_area, cv2.COLOR_BGR2GRAY)
         
-        # حساب المتوسط داخل القناع (Mask)
-        mean_val = cv2.mean(gray, mask=mask)[0]
+        # 3. عد البكسلات التي تتجاوز عتبة اللون الأبيض (مثلاً > 240)
+        white_pixels = np.sum(gray_area > white_pixel_val)
         
-        return mean_val > threshold
+        # 4. حساب إجمالي عدد البكسلات في المنطقة
+        total_pixels = gray_area.size
+        
+        # 5. التحقق من النسبة
+        if total_pixels == 0:
+            return False
+            
+        white_ratio = white_pixels / total_pixels
+        
+        return white_ratio >= white_ratio_threshold
+    
     except Exception as e:
-        print(f"Error in is_bubble_background_white check: {e}")
+        print(f"Error in is_sufficiently_white check: {e}")
         return False
 
 def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
@@ -133,18 +150,13 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
         
         whitened_count = 0
         
-        # 2. المرور على كل فقاعة تم اكتشافها
+        # 2. المرور على كل فقاعة تم اكتشافها (لا توجد فلترة مبكرة على الفقاعة الآن)
         for i, bubble_pred in enumerate(bubble_predictions):
             bubble_points = bubble_pred.get("points", [])
             if len(bubble_points) < 3: continue
             
             bubble_polygon_np = np.array([[int(p["x"]), int(p["y"])] for p in bubble_points], dtype=np.int32)
             x_min, y_min, x_max, y_max = get_bounding_box(bubble_polygon_np)
-
-            # *** الشرط الجديد: التحقق من أن خلفية الفقاعة بيضاء في الغالب (أغلب اللون فيه أبيض) ***
-            if not is_bubble_background_white(image_chunk, bubble_polygon_np, threshold=220):
-                print(f"   Skipping bubble {i+1} (not mostly white).")
-                continue # تخطي الفقاعة إذا لم تكن خلفيتها بيضاء
 
             # 3. اقتصاص الفقاعة لإرسالها لنموذج النص مع هامش موسع (20 بكسل)
             EXPANSION_MARGIN = 20
@@ -166,7 +178,7 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
             # 4. الكشف عن النص داخل الفقاعة المقتطعة
             text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_URL, ROBOFLOW_API_KEY, b64_crop, confidence=25)
             
-            # 5. تطبيق التبييض على النص المكتشف (الآن يتم التبييض بشكل غير مشروط إذا تم اجتياز الفلترة في الخطوة 2)
+            # 5. تطبيق الفلترة والتبييض على النص المكتشف
             if text_predictions:
                 for text_pred in text_predictions:
                     text_points = text_pred.get("points", [])
@@ -176,9 +188,12 @@ def process_single_chunk(image_chunk, y_offset, chunk_index, total_chunks, sid):
                     text_polygon_chunk_coords = np.array([[int(p["x"]) + x_min_exp, int(p["y"]) + y_min_exp] 
                                                         for p in text_points], dtype=np.int32)
                     
-                    # *** تنفيذ التبييض: رسم شكل المضلع (Polygon) مباشرة باللون الأبيض ***
-                    cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
-                    whitened_count += 1
+                    # التحقق من نسبة اللون الأبيض في المنطقة المحيطة بالنص
+                    if is_sufficiently_white(image_chunk, text_polygon_chunk_coords):
+                        
+                        # تطبيق التبييض على شكل المضلع الدقيق (Polygon)
+                        cv2.fillPoly(result_chunk, [text_polygon_chunk_coords], (255, 255, 255))
+                        whitened_count += 1
             
         print(f"   Chunk {chunk_index + 1} finished. Whitened {whitened_count} text areas.")
         
