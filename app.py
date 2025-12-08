@@ -6,6 +6,11 @@ import numpy as np
 import requests
 import base64
 import time
+from PIL import Image, ImageDraw, ImageFont
+from requests.exceptions import RequestException
+import re
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.validation import make_valid
 import uuid
 from flask import Flask, request, render_template, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -13,20 +18,38 @@ from dotenv import load_dotenv
 import eventlet
 import traceback
 from werkzeug.utils import secure_filename
-
-# 🛑 تمت إزالة جميع استيرادات ومعالجة مكتبات PIL, Image, ImageDraw, ImageFont, re, shapely, google.generativeai, io
-# 🛑 تمت إزالة فئة DummyTextFormatter و text_formatter
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import io
 
 eventlet.monkey_patch()
-load_dotenv()
 
+# --- Define DummyTextFormatter Globally First ---
+class DummyTextFormatter:
+    def __init__(self): print("⚠️ WARNING: Initializing DummyTextFormatter.")
+    def set_arabic_font_path(self, path): pass
+    def get_font(self, size): return None
+    def format_arabic_text(self, text): return text
+    def layout_balanced_text(self, draw, text, font, target_width): return text
+
+try:
+    import text_formatter
+    print("✔️ Successfully imported 'text_formatter.py'.")
+    if not all(hasattr(text_formatter, func) for func in ['set_arabic_font_path', 'get_font', 'format_arabic_text', 'layout_balanced_text']):
+         print("⚠️ WARNING: 'text_formatter.py' missing required functions!"); raise ImportError("Missing functions")
+except ImportError as import_err:
+    print(f"❌ ERROR: Cannot import 'text_formatter.py': {import_err}")
+    text_formatter = DummyTextFormatter()
+    print("⚠️ WARNING: Using dummy 'text_formatter'.")
+
+
+load_dotenv()
 # --- Configuration ---
 UPLOAD_FOLDER = 'uploads'
 RESULT_FOLDER = 'results'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
-# ℹ️ نحتفظ بمفتاح Roboflow فقط لاكتشاف النص
 ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
-# 🛑 تمت إزالة GOOGLE_API_KEY
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY') # <-- Add this line to get your Gemini API key
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -55,13 +78,60 @@ except OSError as e:
     print(f"❌ CRITICAL ERROR creating directories: {e}")
     sys.exit(1)
 
-# 🛑 تمت إزالة setup_font
+# --- Font Setup ---
+def setup_font():
+    font_path_to_set = None
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        potential_path_rel = os.path.join(script_dir, "fonts", "66Hayah.otf")
+        potential_path_cwd = os.path.join(".", "fonts", "66Hayah.otf")
+        if os.path.exists(potential_path_rel): font_path_to_set = potential_path_rel
+        elif os.path.exists(potential_path_cwd): font_path_to_set = potential_path_cwd
+        if font_path_to_set:
+            print(f"ℹ️ Font found: '{font_path_to_set}'. Attempting to set path.")
+            try: text_formatter.set_arabic_font_path(font_path_to_set)
+            except AttributeError: print("   (Formatter missing method? Skipping.)")
+        else:
+            print("⚠️ Font 'fonts/66Hayah.otf' not found. Using default.")
+            try: text_formatter.set_arabic_font_path(None)
+            except AttributeError: print("   (Formatter missing method? Skipping.)")
+    except Exception as e:
+        print(f"❌ Error finding font path: {e}. Using default.")
+        try: text_formatter.set_arabic_font_path(None)
+        except AttributeError: print("   (Formatter missing method? Skipping.)")
+        except Exception as E2: print(f"❌ Error setting font path to None: {E2}")
+setup_font()
 
 # --- Constants ---
-# 🛑 تمت إزالة ثوابت الخطوط والنصوص
-# 🛑 تمت إزالة PROMPT_GEMINI
+TEXT_COLOR = (0, 0, 0); SHADOW_COLOR = (255, 255, 255); SHADOW_OPACITY = 90
+# Removed the old LuminAI prompt
+TRANSLATION_PROMPT_GEMINI = 'ترجم هذا النص داخل فقاعة المانجا إلى العربية بوضوح. أرجع الترجمة فقط بين علامتي اقتباس هكذا: "الترجمة هنا".'
 
-# 🛑 تمت إزالة تهيئة Google GenAI
+# --- Initialize Google GenAI ---
+model = None # Initialize model globally to be set after API key check
+if GOOGLE_API_KEY:
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        generation_config = {
+            "temperature": 0.7,
+            "top_p": 1,
+            "top_k": 1,
+            "max_output_tokens": 2048,
+        }
+        safety_settings = [
+            {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+            {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+            {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+            {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+        ]
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash-latest",
+                                    generation_config=generation_config,
+                                    safety_settings=safety_settings)
+        print("✔️ Google GenAI configured successfully.")
+    except Exception as e:
+        print(f"❌ ERROR: Failed to configure Google GenAI: {e}")
+        print("   Please ensure GOOGLE_API_KEY is set correctly.")
+
 
 # --- Helper Functions ---
 def emit_progress(step, message, percentage, sid):
@@ -72,7 +142,8 @@ def emit_error(message, sid):
     socketio.emit('processing_error', {'error': message}, room=sid)
     socketio.sleep(0.01)
 
-# --- Core Functions (Simplified) ---
+
+# --- Core Functions ---
 def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
     model_name = endpoint_url.split('/')[-2] if '/' in endpoint_url else "Unknown Model"
     print(f"ℹ️ Calling Roboflow ({model_name})...")
@@ -87,19 +158,134 @@ def get_roboflow_predictions(endpoint_url, api_key, image_b64, timeout=60):
     except requests.exceptions.RequestException as req_err: print(f"❌ Roboflow ({model_name}) Request Error: {req_err}"); raise ConnectionError(f"Network error contacting Roboflow ({model_name}).") from req_err
     except Exception as e: print(f"❌ Roboflow ({model_name}) Unexpected Error: {e}"); traceback.print_exc(limit=2); raise RuntimeError(f"Unexpected error during Roboflow ({model_name}).") from e
 
-# 🛑 تمت إزالة extract_translation
-# 🛑 تمت إزالة ask_gemini_translation
-# 🛑 تمت إزالة find_optimal_text_settings_final
-# 🛑 تمت إزالة draw_text_on_layer
+def extract_translation(text):
+    if not isinstance(text, str): return ""
+    match = re.search(r'"(.*?)"', text, re.DOTALL);
+    if match: return match.group(1).strip()
+    else: return text.strip().strip('"\'').strip()
 
-# --- Main Processing Task (Simplified) ---
-def process_image_task(image_path, output_filename_base, sid): # 🛑 تمت إزالة 'mode'
-    print(f"ℹ️ SID {sid}: Starting image cleaning task for {image_path}")
-    start_time = time.time(); final_image_np = None; result_data = {}
-    final_output_path = ""
-    # ℹ️ نحتاج فقط إلى نموذج اكتشاف النص
+# --- MODIFIED: ask_gemini_translation function to use Google GenAI ---
+def ask_gemini_translation(prompt, image_bytes, max_retries=3, sid=None):
+    if not model:
+        print("   ❌ Gemini model not initialized. Cannot perform translation.")
+        if sid: emit_error("Translation service unavailable (Gemini not configured).", sid)
+        return ""
+
+    print("ℹ️ Calling Google Gemini for translation...")
+    try:
+        image_pil = Image.open(io.BytesIO(image_bytes))
+        if image_pil.mode != 'RGB':
+            image_pil = image_pil.convert('RGB')
+        gemini_image_data = {
+            "mime_type": "image/jpeg",
+            "data": base64.b64encode(io.BytesIO(image_bytes).getvalue()).decode('utf-8')
+        }
+    except Exception as e:
+        print(f"❌ Error preparing image for Gemini: {e}")
+        if sid: emit_error("Error processing image for translation.", sid)
+        return ""
+
+    contents = [
+        {"text": prompt},
+        {"inline_data": gemini_image_data}
+    ]
+
+    for attempt in range(max_retries):
+        print(f"   Gemini Attempt {attempt + 1}/{max_retries}...")
+        try:
+            response = model.generate_content(contents)
+
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                print(f"❌ Gemini response blocked: {response.prompt_feedback.block_reason}")
+                if sid: emit_error(f"Translation blocked due to content policy.", sid)
+                return ""
+
+            if not response.candidates or not response.candidates[0].content.parts:
+                print(f"❌ Gemini returned no candidates or parts.")
+                if sid: emit_error("Translation service returned empty result.", sid)
+                return ""
+
+            result_text = ""
+            for part in response.candidates[0].content.parts:
+                if part.text:
+                    result_text += part.text
+
+            translation = extract_translation(result_text.strip())
+            print(f"✔️ Gemini translation received: '{translation[:50]}...'")
+            return translation
+
+        except Exception as e:
+            print(f"❌ Error calling Gemini API (Attempt {attempt+1}): {e}")
+            if attempt == max_retries - 1:
+                print("   ❌ Gemini failed after max retries.")
+                if sid: emit_error("Translation service failed.", sid)
+                return ""
+            else:
+                wait_time = 2 * (attempt + 1); print(f"      Retrying in {wait_time}s..."); socketio.sleep(wait_time)
+
+    print("   ❌ Gemini failed after all retries.")
+    if sid: emit_error("Translation unavailable.", sid); return ""
+
+def find_optimal_text_settings_final(draw, text, initial_shrunk_polygon):
+    print("ℹ️ Finding optimal text settings...")
+    if not initial_shrunk_polygon or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   ⚠️ Invalid polygon."); return None
+    if not text: print("   ⚠️ Empty text."); return None
+    if isinstance(text_formatter, DummyTextFormatter): print("   ⚠️ Cannot find settings: DummyFormatter active."); return None
+
+    best_fit = None
+    for font_size in range(65, 4, -1):
+        font = text_formatter.get_font(font_size)
+        if font is None: continue
+        padding_distance = max(1.5, font_size * 0.12); text_fitting_polygon = None
+        try:
+            temp_poly = initial_shrunk_polygon.buffer(-padding_distance, join_style=2)
+            if temp_poly.is_valid and not temp_poly.is_empty and isinstance(temp_poly, Polygon): text_fitting_polygon = temp_poly
+            else:
+                 temp_poly_fallback = initial_shrunk_polygon.buffer(-2.0, join_style=2)
+                 if temp_poly_fallback.is_valid and not temp_poly_fallback.is_empty and isinstance(temp_poly_fallback, Polygon): text_fitting_polygon = temp_poly_fallback
+                 else: continue
+        except Exception as buffer_err: print(f"   ⚠️ Error buffering polygon size {font_size}: {buffer_err}. Skipping."); continue
+        if not text_fitting_polygon: continue
+        minx, miny, maxx, maxy = text_fitting_polygon.bounds; target_width = maxx - minx; target_height = maxy - miny
+        if target_width <= 5 or target_height <= 10: continue
+        wrapped_text = None
+        try: wrapped_text = text_formatter.layout_balanced_text(draw, text, font, target_width)
+        except Exception as layout_err: print(f"   ⚠️ Error in layout size {font_size}: {layout_err}. Skipping."); continue
+        if not wrapped_text: continue
+        try:
+            m_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, spacing=4, align='center')
+            text_actual_width = m_bbox[2] - m_bbox[0]; text_actual_height = m_bbox[3] - m_bbox[1]
+            shadow_offset = max(1, font_size // 18)
+            if (text_actual_height + shadow_offset) <= target_height and (text_actual_width + shadow_offset) <= target_width:
+                x_center_offset = (target_width - text_actual_width) / 2; y_center_offset = (target_height - text_actual_height) / 2
+                draw_x = minx + x_center_offset - m_bbox[0]; draw_y = miny + y_center_offset - m_bbox[1]
+                best_fit = {'text': wrapped_text, 'font': font, 'x': int(round(draw_x)), 'y': int(round(draw_y)), 'font_size': font_size};
+                print(f"   ✔️ Optimal fit found: Size={font_size}, Pos=({best_fit['x']},{best_fit['y']})"); break
+        except Exception as measure_err: print(f"   ⚠️ Error measuring size {font_size}: {measure_err}. Skipping."); continue
+    if best_fit is None: print(f"   ⚠️ Warning: Could not find suitable font size for text: '{text[:30]}...'")
+    return best_fit
+
+def draw_text_on_layer(text_settings, image_size):
+    print("ℹ️ Drawing text layer...")
+    text_layer = Image.new('RGBA', image_size, (0, 0, 0, 0))
+    if not text_settings or not isinstance(text_settings, dict): print("   ⚠️ Invalid text_settings."); return text_layer
+    try:
+        draw_on_layer = ImageDraw.Draw(text_layer); font = text_settings.get('font'); text_to_draw = text_settings.get('text', '');
+        x = text_settings.get('x', 0); y = text_settings.get('y', 0); font_size = text_settings.get('font_size', 10)
+        if not font or not text_to_draw: print("   ⚠️ Missing font or text."); return text_layer
+        shadow_offset = max(1, font_size // 18); shadow_color_with_alpha = SHADOW_COLOR + (SHADOW_OPACITY,)
+        draw_on_layer.multiline_text((x + shadow_offset, y + shadow_offset), text_to_draw, font=font, fill=shadow_color_with_alpha, align='center', spacing=4)
+        draw_on_layer.multiline_text((x, y), text_to_draw, font=font, fill=TEXT_COLOR + (255,), align='center', spacing=4)
+        print(f"   ✔️ Drew text '{text_to_draw[:20]}...' at ({x},{y}) size {font_size}"); return text_layer
+    except Exception as e: print(f"❌ Error in draw_text_on_layer: {e}"); traceback.print_exc(limit=1); return Image.new('RGBA', image_size, (0, 0, 0, 0))
+
+# --- Main Processing Task ---
+def process_image_task(image_path, output_filename_base, mode, sid):
+    print(f"ℹ️ SID {sid}: Starting image processing task for {image_path}")
+    start_time = time.time(); inpainted_image_cv = None; final_image_np = None; translations_list = []
+    final_output_path = ""; result_data = {}; image = None
     ROBOFLOW_TEXT_DETECT_URL = 'https://serverless.roboflow.com/text-detection-w0hkg/1'
-    # 🛑 تمت إزالة ROBOFLOW_BUBBLE_DETECT_URL
+    ROBOFLOW_BUBBLE_DETECT_URL = 'https://outline.roboflow.com/yolo-0kqkh/2'
     try:
         emit_progress(0, "Loading image...", 5, sid);
         image = cv2.imread(image_path)
@@ -109,22 +295,17 @@ def process_image_task(image_path, output_filename_base, sid): # 🛑 تمت إ�
         elif image.shape[2] != 3: raise ValueError(f"Unsupported channels: {image.shape[2]}.")
         h_img, w_img = image.shape[:2];
         if h_img == 0 or w_img == 0: raise ValueError("Image zero dimensions.")
-        # ℹ️ سنستخدم result_image كمتغير للعملية الناتجة بعد التنظيف
         result_image = image.copy(); text_mask = np.zeros(image.shape[:2], dtype=np.uint8)
 
-        # 1. اكتشاف النص
         emit_progress(1, "Detecting text...", 10, sid);
         retval, buffer_text = cv2.imencode('.jpg', image);
         if not retval or buffer_text is None: raise ValueError("Failed encode text detect.")
         b64_image_text = base64.b64encode(buffer_text).decode('utf-8'); text_predictions = []
-        
         try:
             print(f"   Sending request to Roboflow text detection...")
             text_predictions = get_roboflow_predictions(ROBOFLOW_TEXT_DETECT_URL, ROBOFLOW_API_KEY, b64_image_text)
             print(f"   Found {len(text_predictions)} potential text areas.")
             polygons_drawn = 0
-            
-            # 2. إنشاء قناع
             for pred in text_predictions:
                  points = pred.get("points", []);
                  if len(points) >= 3:
@@ -133,68 +314,141 @@ def process_image_task(image_path, output_filename_base, sid): # 🛑 تمت إ�
                      try: cv2.fillPoly(text_mask, [polygon_np], 255); polygons_drawn += 1
                      except Exception as fill_err: print(f"⚠️ Warn: Error drawing text polygon: {fill_err}")
             print(f"   Created text mask with {polygons_drawn} polygons.")
-
-            # 3. التنظيف (Inpainting)
             if np.any(text_mask):
-                 emit_progress(2, "Inpainting (cleaning) text areas...", 50, sid);
                  print(f"   Inpainting detected text areas...")
                  inpainted_image_cv = cv2.inpaint(image, text_mask, 10, cv2.INPAINT_NS)
                  if inpainted_image_cv is None: raise RuntimeError("cv2.inpaint returned None")
                  result_image = inpainted_image_cv
                  print(f"   Inpainting complete.")
-            else: 
-                 emit_progress(2, "No text detected, saving original...", 50, sid);
-                 print(f"   No text detected, skipping inpainting.")
+            else: print(f"   No text detected, skipping inpainting.")
+        except (ValueError, ConnectionError, RuntimeError, requests.exceptions.RequestException) as rf_err: print(f"❌ SID {sid}: Error during Roboflow text detection: {rf_err}. Skipping text removal."); emit_error("Text detection failed.", sid)
+        except Exception as e: print(f"❌ SID {sid}: Error during text detection/inpainting: {e}. Skipping text removal."); emit_error("Text processing error.", sid)
 
-        except (ValueError, ConnectionError, RuntimeError, requests.exceptions.RequestException) as rf_err: 
-            print(f"❌ SID {sid}: Error during Roboflow text detection: {rf_err}. Saving original image."); 
-            emit_error("Text detection failed. Saving original image.", sid)
-            result_image = image # إذا فشل الكشف، نستخدم الصورة الأصلية
+        emit_progress(2, "Detecting bubbles...", 30, sid);
+        b64_bubble = b64_image_text
+        if not b64_bubble:
+             print(f"⚠️ SID {sid}: Missing encoded image data for bubble detection. Trying to re-encode.")
+             retval_b, buffer_b = cv2.imencode('.jpg', image)
+             if retval_b and buffer_b is not None:
+                 b64_bubble = base64.b64encode(buffer_b).decode('utf-8')
+             else:
+                raise ValueError("Missing base64 data & failed re-encode for bubble detection.")
 
-        except Exception as e: 
-            print(f"❌ SID {sid}: Error during text detection/inpainting: {e}. Saving original image."); 
-            emit_error("Text processing error. Saving original image.", sid)
-            result_image = image # إذا فشل التنظيف، نستخدم الصورة الأصلية
-        
-        # 4. حفظ الصورة النظيفة
-        emit_progress(3, "Finalizing and saving image...", 90, sid);
-        final_image_np = result_image
-        output_filename = f"{output_filename_base}_cleaned.jpg" # تسمية الناتج
-        final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
-        result_data = {'mode': 'clean', 'imageUrl': f'/results/{output_filename}'} # ℹ️ تغيير وضع النتيجة
+        bubble_predictions = []
+        try:
+            print(f"   Sending request to Roboflow bubble detection...")
+            bubble_predictions = get_roboflow_predictions(ROBOFLOW_BUBBLE_DETECT_URL, ROBOFLOW_API_KEY, b64_bubble)
+            print(f"   Found {len(bubble_predictions)} speech bubbles.")
+        except (ValueError, ConnectionError, RuntimeError, requests.exceptions.RequestException) as rf_err: print(f"❌ SID {sid}: Error during Roboflow bubble detection: {rf_err}."); emit_error("Bubble detection failed.", sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned_nobubbles.jpg"; final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
+        except Exception as e: print(f"❌ SID {sid}: Error during Roboflow bubble detection: {e}."); emit_error("Bubble detection error.", sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned_nobubbles.jpg"; final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
+
+        if not bubble_predictions and not final_output_path:
+             print(f"   SID {sid}: No speech bubbles detected.")
+             emit_progress(4, "No bubbles detected.", 95, sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned.jpg"; final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
+
+        elif bubble_predictions and not final_output_path:
+             emit_progress(2, f"Processing {len(bubble_predictions)} bubbles...", 40, sid)
+             image_pil = None
+             try: image_pil = Image.fromarray(cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)).convert('RGBA')
+             except Exception as pil_conv_err: print(f"❌ SID {sid}: Error converting to PIL: {pil_conv_err}"); emit_error("Cannot draw (PIL error).", sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned_pil_error.jpg"; final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename); result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
+
+             if image_pil:
+                 temp_draw_for_settings = ImageDraw.Draw(Image.new('RGBA', (1, 1))); image_size = image_pil.size
+                 bubble_count = len(bubble_predictions); processed_count = 0; base_progress = 45; max_progress_bubbles = 90
+                 original_image_for_cropping = image.copy()
+
+                 for i, pred in enumerate(bubble_predictions):
+                     try:
+                          current_bubble_progress = base_progress + int(((i + 1) / bubble_count) * (max_progress_bubbles - base_progress))
+                          emit_progress(3, f"Processing bubble {i + 1}/{bubble_count}...", current_bubble_progress, sid)
+                          points = pred.get("points", []);
+                          if len(points) < 3: print("   Skipping bubble: Not enough points."); continue
+                          coords = [(int(p["x"]), int(p["y"])) for p in points];
+
+                          original_polygon = Polygon(coords)
+                          if not original_polygon.is_valid:
+                              print("   Original polygon is invalid, attempting to fix...")
+                              try: original_polygon = make_valid(original_polygon)
+                              except Exception as mv_err: print(f"   Skipping bubble: make_valid failed: {mv_err}"); continue
+                              if original_polygon.geom_type == 'MultiPolygon':
+                                  print("   Fixed polygon resulted in MultiPolygon, selecting largest.")
+                                  original_polygon = max(original_polygon.geoms, key=lambda p: p.area, default=None)
+                              if not isinstance(original_polygon, Polygon) or original_polygon.is_empty or not original_polygon.is_valid:
+                                  print("   Skipping bubble: Polygon could not be validated or became empty.")
+                                  continue
+                          print(f"   Bubble polygon area: {original_polygon.area:.1f} pixels")
+                          minx_orig, miny_orig, maxx_orig, maxy_orig = map(int, original_polygon.bounds)
+                          minx_orig, miny_orig = max(0, minx_orig), max(0, miny_orig); maxx_orig, maxy_orig = min(w_img, maxx_orig), min(h_img, maxy_orig)
+                          if maxx_orig <= minx_orig or maxy_orig <= miny_orig: print("   Skipping bubble: Invalid crop."); continue
+
+                          bubble_crop = original_image_for_cropping[miny_orig:maxy_orig, minx_orig:maxx_orig]
+                          if bubble_crop.size == 0: print("   Skipping bubble: Crop empty."); continue
+                          _, crop_buffer = cv2.imencode('.jpg', bubble_crop);
+                          if crop_buffer is None: print("   Skipping bubble: Failed encode crop."); continue
+                          crop_bytes = crop_buffer.tobytes()
+
+                          print("   Requesting translation from Gemini...")
+                          translation = ask_gemini_translation(TRANSLATION_PROMPT_GEMINI, crop_bytes, sid=sid)
+                          if not translation: print("   Skipping bubble: Translation failed or empty."); continue
+                          print(f"   Translation received: '{translation}'")
+
+                          if mode == 'extract': translations_list.append({'id': i + 1, 'translation': translation}); processed_count += 1
+                          elif mode == 'auto':
+                              width_orig = maxx_orig - minx_orig; height_orig = maxy_orig - miny_orig; initial_buffer_distance = max(3.0, (width_orig + height_orig) / 2 * 0.10)
+                              initial_shrunk_polygon = None
+                              try:
+                                   shrunk = original_polygon.buffer(-initial_buffer_distance, join_style=2)
+                                   if not shrunk.is_valid or shrunk.is_empty: shrunk_fallback = original_polygon.buffer(-3.0, join_style=2); initial_shrunk_polygon = shrunk_fallback
+                                   else: initial_shrunk_polygon = shrunk
+                                   if not isinstance(initial_shrunk_polygon, Polygon) or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   Warning: Shrunk polygon invalid. Using original."); initial_shrunk_polygon = original_polygon
+                              except Exception as initial_buffer_err: print(f"   Warning: Error shrinking: {initial_buffer_err}. Using original."); initial_shrunk_polygon = original_polygon
+                              if not isinstance(initial_shrunk_polygon, Polygon) or initial_shrunk_polygon.is_empty or not initial_shrunk_polygon.is_valid: print("   Skipping bubble: Final polygon invalid."); continue
+
+                              arabic_text = text_formatter.format_arabic_text(translation)
+                              if not arabic_text: print("   Skipping bubble: Formatted text empty."); continue
+
+                              print("   Finding optimal font size and layout...")
+                              text_settings = find_optimal_text_settings_final(temp_draw_for_settings, arabic_text, initial_shrunk_polygon)
+                              if text_settings:
+                                   print(f"   Optimal settings found: Size {text_settings['font_size']}, Pos ({text_settings['x']}, {text_settings['y']})")
+                                   print("   Drawing text layer...")
+                                   text_layer = draw_text_on_layer(text_settings, image_size)
+                                   if text_layer: print("   Compositing text layer..."); image_pil.paste(text_layer, (0, 0), text_layer); processed_count += 1
+                                   else: print("   Skipping bubble: draw_text_on_layer failed.")
+                              else: print("   Skipping bubble: Could not fit text.")
+                     except Exception as bubble_proc_err: print(f"❌ Error processing bubble {i + 1}: {bubble_proc_err}"); traceback.print_exc(); emit_progress(3, f"Skipping bubble {i+1} (error).", current_bubble_progress, sid); continue
+
+                 if mode == 'extract': emit_progress(4, f"Finished extracting ({processed_count}/{bubble_count}).", 95, sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned.jpg"; result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': translations_list}
+                 elif mode == 'auto':
+                     emit_progress(4, f"Finished drawing ({processed_count}/{bubble_count}).", 95, sid)
+                     try: final_image_rgb = image_pil.convert('RGB'); final_image_np = cv2.cvtColor(np.array(final_image_rgb), cv2.COLOR_RGB2BGR); output_filename = f"{output_filename_base}_translated.jpg"; result_data = {'mode': 'auto', 'imageUrl': f'/results/{output_filename}'}
+                     except Exception as convert_err: print(f"❌ SID {sid}: Error converting final PIL: {convert_err}. Saving cleaned."); emit_error("Failed finalize translated.", sid); final_image_np = result_image; output_filename = f"{output_filename_base}_cleaned_err.jpg"; result_data = {'mode': 'extract', 'imageUrl': f'/results/{output_filename}', 'translations': []}
+                 if not final_output_path: final_output_path = os.path.join(app.config['RESULT_FOLDER'], output_filename)
 
         if final_image_np is not None and final_output_path:
-            save_success = False
+            emit_progress(5, "Saving final image...", 98, sid); save_success = False
             try:
                  save_success = cv2.imwrite(final_output_path, final_image_np);
                  if not save_success: raise IOError(f"cv2.imwrite failed: {final_output_path}")
                  print(f"✔️ Saved (OpenCV): {final_output_path}")
             except Exception as cv_save_err:
                  print(f"⚠️ OpenCV save failed: {cv_save_err}. Trying PIL...");
-                 try: # محاولة الحفظ باستخدام PIL كخطة بديلة
-                     from PIL import Image
-                     pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB)); 
-                     os.makedirs(os.path.dirname(final_output_path), exist_ok=True); 
-                     pil_img_to_save.save(final_output_path); 
-                     save_success = True; print(f"✔️ Saved (PIL): {final_output_path}")
-                 except Exception as pil_save_err: 
-                     print(f"❌ PIL save failed: {pil_save_err}"); 
-                     emit_error("Failed save final image.", sid)
-            
+                 try: pil_img_to_save = Image.fromarray(cv2.cvtColor(final_image_np, cv2.COLOR_BGR2RGB)); os.makedirs(os.path.dirname(final_output_path), exist_ok=True); pil_img_to_save.save(final_output_path); save_success = True; print(f"✔️ Saved (PIL): {final_output_path}")
+                 except Exception as pil_save_err: print(f"❌ PIL save failed: {pil_save_err}"); emit_error("Failed save final image.", sid)
             if save_success:
-                processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s."); 
-                emit_progress(4, f"Complete ({processing_time:.2f}s).", 100, sid)
+                processing_time = time.time() - start_time; print(f"✔️ SID {sid} Complete {processing_time:.2f}s."); emit_progress(6, f"Complete ({processing_time:.2f}s).", 100, sid)
+                if not result_data:
+                    print(f"⚠️ SID {sid}: Result data was empty before completion. Creating default based on mode.")
+                    result_data = {'mode': mode, 'imageUrl': f'/results/{os.path.basename(final_output_path)}'}
+                    if mode == 'extract': result_data['translations'] = translations_list
                 socketio.emit('processing_complete', result_data, room=sid)
-            else: 
-                print(f"❌❌❌ SID {sid}: Critical Error: Could not save image {final_output_path}")
-        else: 
-            print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
-    
+            else: print(f"❌❌❌ SID {sid}: Critical Error: Could not save image {final_output_path}")
+        elif not final_output_path: print(f"❌ SID {sid}: Aborted before output path set.")
+        else: print(f"❌ SID {sid}: No final image data."); emit_error("Internal error: No final image.", sid)
     except Exception as e:
         print(f"❌❌❌ SID {sid}: UNHANDLED FATAL ERROR in task: {e}")
         traceback.print_exc()
-        emit_error(f"Unexpected server error during cleaning ({type(e).__name__}).", sid)
-    
+        emit_error(f"Unexpected server error during processing ({type(e).__name__}).", sid)
     finally:
         try:
             if image_path and os.path.exists(image_path):
@@ -206,7 +460,6 @@ def process_image_task(image_path, output_filename_base, sid): # 🛑 تمت إ�
 # --- Flask Routes ---
 @app.route('/')
 def index():
-    # ℹ️ يجب تعديل ملف index.html لتناسب وضع التنظيف فقط
     return render_template('index.html')
 
 @app.route('/results/<path:filename>')
@@ -284,13 +537,15 @@ def handle_start_processing(data):
         emit_error("Invalid request data.", sid); return
     output_filename_base = data.get('output_filename_base')
     saved_filename = data.get('saved_filename')
-    # 🛑 تمت إزالة 'mode' من التحقق والتعامل
+    mode = data.get('mode')
     print(f"   Data received: {data}")
     if not output_filename_base:
         emit_error('Missing file identifier (output_filename_base).', sid); return
     if not saved_filename:
         emit_error('Missing saved filename.', sid); return
-        
+    if mode not in ['extract', 'auto']:
+        emit_error(f"Invalid mode ('{mode}').", sid); return
+    print(f"   Mode: '{mode}'")
     upload_dir = app.config['UPLOAD_FOLDER']
     upload_path = os.path.join(upload_dir, secure_filename(saved_filename))
     if not os.path.exists(upload_path) or not os.path.isfile(upload_path):
@@ -298,37 +553,42 @@ def handle_start_processing(data):
         emit_error(f"Uploaded file '{saved_filename}' not found on server. Please try uploading again.", sid)
         return
     print(f"   File confirmed exists: {upload_path}")
-    print(f"   Attempting to start background cleaning task...")
+    print(f"   Attempting to start background task...")
     try:
         socketio.start_background_task(
             process_image_task,
             image_path=upload_path,
             output_filename_base=output_filename_base,
+            mode=mode,
             sid=sid
         )
         print(f"   ✔️ Task initiated SID {sid} for {saved_filename}.")
-        socketio.emit('processing_started', {'message': 'File received, cleaning started...'}, room=sid)
+        socketio.emit('processing_started', {'message': 'File received, processing started...'}, room=sid)
     except Exception as task_start_err:
         print(f"❌ CRITICAL SID {sid}: Failed to start background task: {task_start_err}")
         traceback.print_exc()
-        emit_error(f"Server error starting image cleaning task.", sid)
+        emit_error(f"Server error starting image processing task.", sid)
     print(f"--- Finished handle 'start_processing' SID: {sid} ---")
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    print("--- Starting Manga Processor Web App (Cleaner Mode) ---")
-    if not ROBOFLOW_API_KEY: print("███ WARNING: ROBOFLOW_API_KEY env var not set! Text detection will fail. ███")
+    print("--- Starting Manga Processor Web App (Flask + SocketIO + Eventlet) ---")
+    if not ROBOFLOW_API_KEY: print("███ WARNING: ROBOFLOW_API_KEY env var not set! ███")
     if app.config['SECRET_KEY'] == 'change_this_in_production': print("⚠️ WARNING: Using default Flask SECRET_KEY!")
-    # 🛑 تمت إزالة تحذير GOOGLE_API_KEY
+    if not GOOGLE_API_KEY: print("███ WARNING: GOOGLE_API_KEY env var not set! Gemini features will not work. ███")
     port = int(os.environ.get('PORT', 5000))
     print(f"   * Flask App: {app.name}")
     print(f"   * Upload Folder: {os.path.abspath(app.config['UPLOAD_FOLDER'])}")
     print(f"   * Result Folder: {os.path.abspath(app.config['RESULT_FOLDER'])}")
     print(f"   * Allowed Ext: {ALLOWED_EXTENSIONS}")
-    # 🛑 تمت إزالة معلومات Text Formatter
+    print(f"   * Text Formatter: {'Dummy' if isinstance(text_formatter, DummyTextFormatter) else 'Loaded'}")
+    print(f"   * SocketIO Async: {socketio.async_mode}")
     print(f"   * Roboflow Key: {'Yes' if ROBOFLOW_API_KEY else 'NO (!)'}")
-    print(f"   * Mode: Text Cleaning (Inpainting) Only")
+    print(f"   * Google API Key: {'Yes' if GOOGLE_API_KEY else 'NO (!)'}")
+    print(f"   * Upload Limit: {app.config['MAX_CONTENT_LENGTH'] / (1024*1024):.1f} MB")
+    print(f"   * SocketIO Ping Timeout: {socketio.ping_timeout}s")
     print(f"   * Starting server http://0.0.0.0:{port}")
+    print("   * NOTE: For production, consider using Gunicorn with eventlet workers or Waitress.")
     try:
         socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=False)
     except Exception as run_err:
