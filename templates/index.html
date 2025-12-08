@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مبيض المانجا التلقائي</title>
+    <title>منظف نصوص المانجا التلقائي</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -13,8 +13,8 @@
 <body>
     <div class="container">
         <header>
-            <h1>مبيض المانجا التلقائي</h1>
-            <p>أداة ذكية لتنظيف فقاعات النصوص وتبييض الخلفيات البيضاء تلقائيًا.</p>
+            <h1>منظف نصوص المانجا التلقائي</h1>
+            <p>أداة ذكية لإزالة النصوص الأصلية من فقاعات الكلام (التبييض) تلقائيًا.</p>
         </header>
 
         <main>
@@ -22,51 +22,45 @@
                 <h2>رفع الملفات</h2>
                 <div class="form-group">
                     <label for="imageUpload" class="btn btn-secondary">
-                        اختر صورة أو ملف ZIP
+                        اختر صورة (PNG, JPG, WEBP)
                     </label>
-                    <input type="file" id="imageUpload" accept=".png, .jpg, .jpeg, .webp, .zip" style="display: none;">
+                    <input type="file" id="imageUpload" accept=".png, .jpg, .jpeg, .webp" style="display: none;">
                     <span id="fileName">لم يتم اختيار أي ملف</span>
                 </div>
                 
-                <p class="hint-text">يدعم الصور الفردية أو ملفات ZIP للمعالجة الجماعية.</p>
+                <p class="hint-text">اختر صورة لمعالجة النصوص وإزالتها.</p>
 
-                <button id="processButton" class="btn btn-primary" disabled>بدء التبييض</button>
+                <button id="processButton" class="btn btn-primary" disabled>بدء التنظيف (Inpainting)</button>
             </section>
 
             <section id="progress-section" class="card" style="display: none;">
                 <h2>جاري المعالجة...</h2>
                 <progress id="progressBar" value="0" max="100"></progress>
                 <p id="progressText">يتم التحضير...</p>
-                <div id="batch-log" style="font-size: 0.9em; color: #666; margin-top: 10px; max-height: 100px; overflow-y: auto;"></div>
                 <p id="errorText" class="error-message" style="display: none;"></p>
             </section>
 
             <section id="result-section" class="card" style="display: none;">
-                <h2>النتائج</h2>
+                <h2>النتيجة</h2>
 
-                <div id="image-result-area" style="display: none;">
-                    <h3 id="image-result-title">تمت المعالجة بنجاح</h3>
+                <div id="image-result-area">
+                    <h3 id="image-result-title">تم تنظيف الصورة بنجاح</h3>
                     <div class="image-wrapper">
                         <img id="resultImage" src="#" alt="Processed Image">
                     </div>
                     <br>
-                    <a id="downloadLink" href="#" download="processed_image.jpg" class="btn btn-secondary">
-                        تحميل الصورة
+                    <a id="downloadLink" href="#" download="cleaned_manga.jpg" class="btn btn-secondary">
+                        تحميل الصورة المنظفة
                     </a>
                 </div>
                 
-                <div id="batch-result-area" style="display: none;">
-                    <h3>الملفات التي تمت معالجتها:</h3>
-                    <ul id="batch-links-list" style="list-style: none; padding: 0;"></ul>
-                </div>
-
                 <br>
-                <button id="processAnotherButton" class="btn btn-secondary">معالجة ملف آخر</button>
+                <button id="processAnotherButton" class="btn btn-secondary">تنظيف ملف آخر</button>
             </section>
         </main>
 
         <footer>
-            <p>Manga Whitener &copy; 2025</p>
+            <p>Manga Cleaner &copy; 2025</p>
         </footer>
     </div>
     
