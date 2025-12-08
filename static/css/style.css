@@ -187,6 +187,38 @@ header p {
     min-height: 1.2em; /* Prevent layout shifts */
 }
 
+/* --- Tweak for Batch Log --- */
+#batch-log {
+    font-family: monospace; /* خط أحادي لتسهيل قراءة ال logs */
+    font-size: 0.9em; 
+    color: #555;
+    margin-top: 15px; 
+    max-height: 150px; /* حجم ثابت للسجل */
+    overflow-y: auto; /* إضافة شريط تمرير */
+    padding: 10px;
+    border: 1px solid #ddd;
+    background-color: #fafafa;
+    border-radius: 4px;
+    text-align: right;
+}
+#batch-log div {
+    white-space: nowrap; /* منع انقسام السطر */
+    margin-bottom: 3px;
+    padding-right: 5px;
+    border-right: 3px solid transparent; /* حافة للتمييز */
+}
+#batch-log div[style*="green"] {
+    border-right-color: #27ae60; /* لون أخضر للنجاح */
+}
+#batch-log div[style*="red"] {
+    border-right-color: #e74c3c; /* لون أحمر للخطأ */
+}
+#batch-log div[style*="blue"] {
+    border-right-color: #3498db; /* لون أزرق للمعلومات */
+}
+/* --- End Batch Log Tweak --- */
+
+
 .error-message {
     color: #e74c3c; /* Red for errors */
     font-weight: bold;
@@ -216,8 +248,33 @@ header p {
     max-width: 200px;
 }
 
+/* Batch Results List Styling */
+#batch-links-list {
+    list-style: none;
+    padding: 0;
+}
+#batch-links-list li {
+    display: flex; /* ترتيب العناصر في سطر واحد */
+    justify-content: space-between; /* توزيع المسافة بين العناصر */
+    align-items: center;
+    padding: 8px 10px;
+    border-bottom: 1px solid #eee;
+}
+#batch-links-list li:last-child {
+    border-bottom: none;
+}
+#batch-links-list li span {
+    font-weight: 600;
+}
+/* تنسيق الزر الصغير في قائمة الدفعة */
+.btn-sm {
+    padding: 4px 10px !important;
+    font-size: 0.85em !important;
+    margin-top: 0 !important;
+}
 
-/* Table Styling */
+
+/* Table Styling (if translation re-enabled, keep for robustness) */
 .table-container {
     max-height: 400px; /* Limit table height and add scroll */
     overflow-y: auto;
