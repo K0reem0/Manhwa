@@ -1,4 +1,4 @@
-// --- File: script.js (Re-enabled Batch Mode / Text Cleaning Only) ---
+// --- File: script.js (Text Cleaner Mode) ---
 
 Document.addEventListener('DOMContentLoaded', () => {
     // --- Get DOM Elements ---
@@ -12,28 +12,24 @@ Document.addEventListener('DOMContentLoaded', () => {
     const progressSection = document.getElementById('progress-section');
     const progressBar = document.getElementById('progressBar');
     const progressText = document.getElementById('progressText');
-    const batchLog = document.getElementById('batch-log'); 
     const errorText = document.getElementById('errorText');
     
     const resultSection = document.getElementById('result-section');
     
-    // Single Image Result Elements
+    // Single Image Result Elements (Only area needed now)
     const imageResultArea = document.getElementById('image-result-area');
     const imageResultTitle = document.getElementById('image-result-title');
     const resultImage = document.getElementById('resultImage');
     const downloadLink = document.getElementById('downloadLink');
     
-    // Batch Result Elements
-    const batchResultArea = document.getElementById('batch-result-area'); 
-    const batchLinksList = document.getElementById('batch-links-list'); 
-
+    // 🛑 تم حذف عناصر نتائج الدفعة (Batch) و batchLog و batchLinksList لتبسيط الواجهة
     const processAnotherButton = document.getElementById('processAnotherButton');
 
     let selectedFile = null;
     let isConnected = false;
-    let isBatchMode = false; // لتتبع حالة المعالجة الحالية
-
-    // ℹ️ وضع المعالجة الثابت: تنظيف النص فقط (Text Cleaning)
+    // 🛑 تم حذف isBatchMode
+    
+    // ℹ️ وضع المعالجة الثابت: تنظيف النص فقط
     const PROCESSING_MODE = 'clean'; 
 
     // --- Initialize Socket.IO ---
@@ -78,116 +74,57 @@ Document.addEventListener('DOMContentLoaded', () => {
 
     // --- SocketIO Processing Listeners ---
     
-    // 1. استقبال بداية الدفعة (خاص بملفات ZIP)
-    socket.on('batch_started', (data) => {
-        console.log('Batch started:', data);
-        if (isBatchMode && batchLog) {
-            const msg = document.createElement('div');
-            msg.textContent = `🚀 تم استلام ${data.total_images} صورة. بدء المعالجة...`;
-            msg.style.color = '#38bdf8'; // لون فاتح
-            batchLog.appendChild(msg);
-            batchLog.scrollTop = batchLog.scrollHeight;
-        }
-    });
+    // 🛑 تم حذف listener: batch_started
     
-    // 2. تحديث التقدم
+    // 1. تحديث التقدم
     socket.on('progress_update', (data) => {
         const percentage = (data.percentage >= 0 && data.percentage <= 100) ? data.percentage : progressBar.value;
         progressBar.value = percentage;
         progressText.textContent = `${data.message} (${percentage}%)`;
         errorText.style.display = 'none';
     });
-    
-    // 3. اكتمال الدفعة الكلية (إشارة من الخادم بعد معالجة جميع الصور)
-    socket.on('batch_complete', (data) => {
-        if (isBatchMode) {
-            console.log('Batch fully complete:', data.message);
-            progressText.textContent = '✨ اكتملت معالجة الدفعة بالكامل!';
-            // إظهار قسم النتائج النهائية وإلغاء تعطيل الزر
-            resultSection.style.display = 'block';
-            processButton.disabled = false;
-        }
-    });
 
-
-    // 4. اكتمال معالجة عنصر واحد (صورة فردية أو داخل دفعة)
+    // 2. اكتمال المعالجة (لصورة فردية فقط الآن)
     socket.on('processing_complete', (data) => {
         console.log('✅ Processing complete for item:', data);
         
+        progressBar.value = 100;
+        progressText.textContent = '✨ اكتملت المعالجة!';
+        
+        // إخفاء شريط التقدم بعد فترة قصيرة
+        setTimeout(() => { progressSection.style.display = 'none'; }, 500);
+
+        // --- عرض نتيجة الصورة الفردية ---
+        resultSection.style.display = 'block';
+        imageResultArea.style.display = 'block';
+        
         // إضافة طابع زمني لتجنب الكاش
         const finalUrl = data.imageUrl + '?t=' + Date.now();
-        const originalFileName = data.original_filename || (selectedFile ? selectedFile.name : 'image.jpg');
+        const originalFileName = selectedFile ? selectedFile.name.split('.').slice(0, -1).join('.') : 'image';
+        
+        imageResultTitle.textContent = "الصورة المنظفة";
+        downloadLink.href = finalUrl;
+        downloadLink.download = `cleaned_${originalFileName}.jpg`; // اسم تحميل واضح
+        downloadLink.style.display = 'inline-block';
 
-        if (isBatchMode) {
-            // --- وضع الحزمة (ZIP) ---
-            batchResultArea.style.display = 'block';
-            imageResultArea.style.display = 'none'; // إخفاء عرض الصورة الفردية
-            // إبقاء شريط التقدم ظاهراً
-            progressSection.style.display = 'block'; 
-
-            // إضافة رابط للملف المعالج في القائمة
-            const li = document.createElement('li');
-            li.className = "batch-item"; 
-            li.style.marginBottom = "8px";
-            li.innerHTML = `
-                <span>📄 ${originalFileName}</span> 
-                <span style="margin: 0 10px;">➔</span>
-                <a href="${finalUrl}" target="_blank" class="btn btn-sm" style="padding: 2px 8px; font-size: 0.8em;">عرض</a>
-                <a href="${finalUrl}" download="cleaned_${originalFileName}" class="btn btn-sm btn-primary" style="padding: 2px 8px; font-size: 0.8em;">تحميل</a>
-            `;
-            batchLinksList.appendChild(li);
-
-            // تحديث السجل
-            if(batchLog) {
-                const logMsg = document.createElement('div');
-                logMsg.textContent = `✔️ تم: ${originalFileName}`;
-                logMsg.style.color = "green";
-                batchLog.appendChild(logMsg);
-                batchLog.scrollTop = batchLog.scrollHeight; // تمرير لأسفل
-            }
-
-        } else {
-            // --- وضع الصورة الفردية ---
-            progressBar.value = 100;
-            progressText.textContent = '✨ اكتملت المعالجة!';
-            
-            // إخفاء شريط التقدم بعد فترة قصيرة
-            setTimeout(() => { progressSection.style.display = 'none'; }, 500);
-
-            resultSection.style.display = 'block';
-            imageResultArea.style.display = 'block';
-            batchResultArea.style.display = 'none';
-            
-            imageResultTitle.textContent = "الصورة المنظفة";
-            downloadLink.href = finalUrl;
-            downloadLink.download = "cleaned_" + originalFileName;
-            downloadLink.style.display = 'inline-block';
-
-            // تحميل الصورة
-            resultImage.onload = () => {
-                resultImage.style.display = 'block';
-            };
-            resultImage.src = finalUrl;
-            processButton.disabled = false;
-        }
+        // تحميل الصورة
+        resultImage.onload = () => {
+            resultImage.style.display = 'block';
+        };
+        resultImage.src = finalUrl;
+        
+        // إعادة تفعيل زر "معالجة ملف آخر"
+        processButton.disabled = false; 
     });
 
     socket.on('processing_error', (data) => {
         console.error('❌ Processing Error:', data.error);
-        if (isBatchMode && batchLog) {
-            // في وضع الحزمة، نسجل الخطأ في السجل بدلاً من إيقاف كل شيء
-            const errDiv = document.createElement('div');
-            errDiv.textContent = `❌ خطأ في المعالجة: ${data.error}`;
-            errDiv.style.color = 'red';
-            batchLog.appendChild(errDiv);
-            batchLog.scrollTop = batchLog.scrollHeight;
-        } else {
-            errorText.textContent = `😭 خطأ في المعالجة: ${data.error}`;
-            errorText.style.display = 'block';
-            progressSection.style.display = 'none';
-            uploadSection.style.display = 'block';
-            processButton.disabled = !(selectedFile && isConnected);
-        }
+        
+        errorText.textContent = `😭 خطأ في المعالجة: ${data.error}`;
+        errorText.style.display = 'block';
+        progressSection.style.display = 'none';
+        uploadSection.style.display = 'block';
+        processButton.disabled = !(selectedFile && isConnected);
     });
 
     // --- DOM Event Listeners ---
@@ -197,21 +134,19 @@ Document.addEventListener('DOMContentLoaded', () => {
         selectedFile = event.target.files[0];
 
         if (selectedFile) {
+             // ℹ️ التحقق يقتصر على أنواع الصور
              const fileName = selectedFile.name.toLowerCase();
-             const isZip = fileName.endsWith('.zip');
              const isImage = fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || fileName.endsWith('.png') || fileName.endsWith('.webp');
 
-             if (!isZip && !isImage) {
-                 alert(`نوع الملف غير مدعوم. يرجى رفع صورة (JPG, PNG) أو ملف مضغوط (ZIP).`);
+             if (!isImage) {
+                 alert(`نوع الملف غير مدعوم. يرجى رفع صورة (JPG, PNG, WEBP).`);
                  resetFileSelection(); return;
              }
 
              fileNameSpan.textContent = selectedFile.name;
              processButton.disabled = !isConnected;
              
-             // تحديد الوضع بناءً على الملف
-             isBatchMode = isZip; 
-             console.log(`File selected. Mode: ${isBatchMode ? 'Batch (ZIP)' : 'Single Image'}`);
+             // 🛑 تم حذف منطق تحديد الوضع isBatchMode
 
         } else {
             resetFileSelection();
@@ -234,9 +169,7 @@ Document.addEventListener('DOMContentLoaded', () => {
         resultSection.style.display = 'none';
         errorText.style.display = 'none';
         
-        // تنظيف واجهة الحزمة
-        if(batchLog) batchLog.innerHTML = '';
-        if(batchLinksList) batchLinksList.innerHTML = '';
+        // 🛑 تم حذف تنظيف واجهة الحزمة
 
         progressBar.value = 0;
         progressText.textContent = '⏫ بدء الرفع... (0%)';
@@ -267,26 +200,12 @@ Document.addEventListener('DOMContentLoaded', () => {
                 progressBar.value = 100; 
                 progressText.textContent = '⏳ تم الرفع. بدء المعالجة...';
 
-                // إرسال إشارة البدء بناءً على نوع الملف
-                if (isBatchMode) {
-                    // للدفعة (ZIP) - استخدام البيانات من /upload_zip
-                    if (resultJson.images_to_process) {
-                        socket.emit('start_batch_processing', {
-                            images_to_process: resultJson.images_to_process,
-                            temp_dir: resultJson.temp_dir, // إضافة مسار المجلد المؤقت للتنظيف
-                            mode: PROCESSING_MODE // الوضع الثابت: clean
-                        });
-                    } else {
-                        handleUploadError("لم يتم العثور على صور صالحة داخل ملف ZIP.");
-                    }
-                } else {
-                    // للصورة الفردية - استخدام البيانات من /upload
-                    socket.emit('start_processing', {
-                        output_filename_base: resultJson.output_filename_base,
-                        saved_filename: resultJson.saved_filename,
-                        mode: PROCESSING_MODE // الوضع الثابت: clean
-                    });
-                }
+                // إرسال إشارة البدء للصورة الفردية فقط
+                socket.emit('start_processing', {
+                    output_filename_base: resultJson.output_filename_base,
+                    saved_filename: resultJson.saved_filename,
+                    mode: PROCESSING_MODE // الوضع: clean
+                });
 
             } else {
                 let msg = "حدث خطأ أثناء الرفع.";
@@ -299,8 +218,8 @@ Document.addEventListener('DOMContentLoaded', () => {
             handleUploadError("خطأ في الشبكة أثناء الرفع.");
         });
 
-        // تحديد الرابط بناءً على نوع الملف
-        const uploadUrl = isBatchMode ? '/upload_zip' : '/upload';
+        // ℹ️ رابط الرفع ثابت الآن: /upload
+        const uploadUrl = '/upload';
         
         try {
              xhr.open('POST', uploadUrl, true);
@@ -317,10 +236,6 @@ Document.addEventListener('DOMContentLoaded', () => {
         progressSection.style.display = 'none';
         uploadSection.style.display = 'block';
         processButton.disabled = !(selectedFile && isConnected);
-        
-        // إذا كان هناك فشل في الرفع، نتأكد من تنظيف قائمة الروابط القديمة
-        if(batchLinksList) batchLinksList.innerHTML = '';
-        if(batchLog) batchLog.innerHTML = '';
     }
 
     // --- UI Helper Functions ---
@@ -333,19 +248,17 @@ Document.addEventListener('DOMContentLoaded', () => {
         selectedFile = null;
         fileNameSpan.textContent = 'لم يتم اختيار أي ملف';
         processButton.disabled = true;
-        isBatchMode = false;
     }
 
     function resetResultArea() {
         resultSection.style.display = 'none';
         imageResultArea.style.display = 'none';
-        batchResultArea.style.display = 'none';
+        // 🛑 تم حذف batchResultArea
         
         resultImage.src = "#";
         resultImage.style.display = 'none';
         
-        if(batchLinksList) batchLinksList.innerHTML = '';
-        if(batchLog) batchLog.innerHTML = '';
+        // 🛑 تم حذف batchLinksList و batchLog
         
         errorText.style.display = 'none';
     }
