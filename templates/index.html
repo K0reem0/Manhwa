@@ -2,7 +2,8 @@
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"> <title>معالج فقاعات المانجا</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>معالج فقاعات المانجا</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -13,15 +14,15 @@
     <div class="container">
         <header>
             <h1>معالج فقاعات المانجا</h1>
-            <p>قم بتنظيف صفحات المانجا واستخرج النصوص أو قم بترجمتها وتطبيقها تلقائيًا.</p>
+            <p>قم بتنظيف صفحات المانجا واستخرج النصوص أو قم بترجمتها وتطبيقها تلقائيًا. (يدعم الصور الفردية وملفات ZIP)</p>
         </header>
 
         <main>
             <section id="upload-section" class="card">
-                <h2>1. رفع الصورة واختيار الوضع</h2>
+                <h2>1. رفع الملف واختيار الوضع</h2>
                 <div class="form-group">
-                    <label for="imageUpload" class="btn btn-secondary">اختر صورة مانجا</label>
-                    <input type="file" id="imageUpload" accept="image/png, image/jpeg, image/webp" style="display: none;">
+                    <label for="imageUpload" class="btn btn-secondary">اختر صورة مانجا (PNG, JPG, WEBP) أو ملف مضغوط (ZIP)</label>
+                    <input type="file" id="imageUpload" accept="image/png, image/jpeg, image/webp, application/zip" style="display: none;">
                     <span id="fileName">لم يتم اختيار أي ملف</span>
                 </div>
 
@@ -44,21 +45,35 @@
                 <h2>جاري المعالجة...</h2>
                 <progress id="progressBar" value="0" max="100"></progress>
                 <p id="progressText">...</p>
-                <p id="errorText" class="error-message" style="display: none;"></p> </section>
+                <p id="errorText" class="error-message" style="display: none;"></p>
+            </section>
 
             <section id="result-section" class="card" style="display: none;">
                 <h2>النتائج</h2>
 
+                <div id="batch-result-container" style="display:none; margin-top: 20px;">
+                    <h3>نتائج المعالجة الدفعية</h3>
+                    <p class="summary-text">ملخص: <span id="batchSummaryText"></span></p>
+                    <ul id="batchImagesList" class="batch-list">
+                        </ul>
+                </div>
                 <div id="image-result-area" style="display: none;">
-                    <h3 id="image-result-title">الصورة المعالجة</h3> <img id="resultImage" src="#" alt="Processed Image">
-                     <a id="downloadLink" href="#" download="processed_image.jpg" class="btn btn-secondary">
+                    <h3 id="image-result-title">الصورة المعالجة</h3> 
+                    
+                    <div id="imageLoadingIndicator" class="loading-spinner" style="display: none;">
+                        <p>جارٍ تحميل الصورة...</p>
+                    </div>
+
+                    <img id="resultImage" src="#" alt="Processed Image" style="display: none;">
+                     <a id="downloadLink" href="#" download="processed_image.jpg" class="btn btn-secondary" style="display: none;">
                         تحميل الصورة
                     </a>
                 </div>
 
                 <div id="table-result-area" style="display: none;">
                     <h3>النصوص المترجمة المستخرجة</h3>
-                    <div class="table-container"> <table id="translationsTable">
+                    <div class="table-container"> 
+                        <table id="translationsTable">
                             <thead>
                                 <tr>
                                     <th># الفقاعة</th>
@@ -71,7 +86,7 @@
                     </div>
                 </div>
 
-                <button id="processAnotherButton" class="btn btn-secondary">معالجة صورة أخرى</button>
+                <button id="processAnotherButton" class="btn btn-secondary">معالجة ملف آخر</button>
             </section>
 
             <section id="manual-edit-info" class="card info-card">
@@ -83,6 +98,7 @@
         <footer>
             <p>Manga Processor &copy; 2025</p>
         </footer>
-    </div> <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+    </div> 
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
 </body>
 </html>
