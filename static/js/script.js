@@ -1,4 +1,4 @@
-Document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', () => {
     // --- Get DOM Elements ---
     const imageUpload = document.getElementById('imageUpload');
     const fileUploadLabel = document.querySelector('label[for="imageUpload"]');
@@ -197,7 +197,7 @@ Document.addEventListener('DOMContentLoaded', () => {
         selectedFile = event.target.files[0];
         console.log("File selected:", selectedFile);
         if (selectedFile) {
-             const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'application/zip'];
+             const allowedTypes = ['image/png', 'image/jpeg', 'image/webp'];
              const maxSizeMB = 9999999999999; // Match Flask config
              const maxSizeBytes = maxSizeMB * 1024 * 1024;
 
