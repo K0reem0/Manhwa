@@ -22,14 +22,14 @@ Document.addEventListener('DOMContentLoaded', () => {
     const modeAutoRadio = document.getElementById('modeAuto');
     
     // --- Elements for Batch Processing Results ---
-    const batchResultContainer = document.getElementById('batch-result-container'); // Assume this new div exists
-    const batchSummaryText = document.getElementById('batchSummaryText'); // Assume this new span/p exists
-    const batchImagesList = document.getElementById('batchImagesList'); // Assume this new UL exists
+    const batchResultContainer = document.getElementById('batch-result-container');
+    const batchSummaryText = document.getElementById('batchSummaryText');
+    const batchImagesList = document.getElementById('batchImagesList');
     
     // --- State Variables ---
     let selectedFile = null;
     let isConnected = false;
-    let isBatchProcessing = false; // Flag to track batch mode
+    let isBatchProcessing = false;
     let batchTotalImages = 0;
     let batchCompletedImages = 0;
 
@@ -314,11 +314,11 @@ Document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // ❌ تم إزالة e.preventDefault(); هنا لحل مشكلة إغلاق النافذة المفاجئ 
-    fileUploadLabel.addEventListener('click', (e) => {
-        // e.preventDefault(); // تم إزالة هذا السطر
-        imageUpload.click();
-    });
+    // ⛔️ تم حذف مستمع النقر على الـ label هنا.
+    // يجب أن يعتمد الآن على ربط HTML القياسي (for="imageUpload") لتشغيل الـ input المخفي.
+    // fileUploadLabel.addEventListener('click', (e) => {
+    //     imageUpload.click();
+    // });
 
     // --- Process Button Click Handler (MODIFIED for ZIP) ---
     processButton.addEventListener('click', () => {
