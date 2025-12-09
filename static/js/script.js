@@ -21,7 +21,7 @@ Document.addEventListener('DOMContentLoaded', () => {
     const modeExtractRadio = document.getElementById('modeExtract');
     const modeAutoRadio = document.getElementById('modeAuto');
     
-    // --- NEW: Elements for Batch Processing Results ---
+    // --- Elements for Batch Processing Results ---
     const batchResultContainer = document.getElementById('batch-result-container'); // Assume this new div exists
     const batchSummaryText = document.getElementById('batchSummaryText'); // Assume this new span/p exists
     const batchImagesList = document.getElementById('batchImagesList'); // Assume this new UL exists
@@ -89,7 +89,6 @@ Document.addEventListener('DOMContentLoaded', () => {
     // --- SocketIO Processing Status Listeners ---
     socket.on('processing_started', (data) => {
         console.log('Processing started:', data.message);
-        // Only update progress bar/text if it's NOT a batch (batch has its own logic)
         if (!isBatchProcessing) {
             progressText.textContent = data.message || '⏳ بدأت المعالجة...';
             progressBar.value = 5;
@@ -97,7 +96,6 @@ Document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.on('progress_update', (data) => {
-        // Only update progress bar/text if it's NOT a batch
         if (!isBatchProcessing) {
             const percentage = (data.percentage >= 0 && data.percentage <= 100) ? data.percentage : progressBar.value;
             progressBar.value = percentage;
@@ -105,31 +103,26 @@ Document.addEventListener('DOMContentLoaded', () => {
             progressText.textContent = `${stepPrefix}${data.message} (${percentage}%)`;
             errorText.style.display = 'none';
         } else {
-             // For batch mode, show a simpler global status
              progressText.textContent = `⏳ معالجة دفعة (${batchCompletedImages}/${batchTotalImages}): ${data.message}`;
         }
     });
     
-    // --- NEW: Batch Started Listener ---
+    // --- Batch Started Listener ---
     socket.on('batch_started', (data) => {
         isBatchProcessing = true;
         batchTotalImages = data.total_images;
         batchCompletedImages = 0;
         console.log(`Batch processing started for ${batchTotalImages} images.`);
         
-        // Reset batch result display
         batchImagesList.innerHTML = '';
         batchSummaryText.textContent = `بدء معالجة ${batchTotalImages} صورة...`;
         
-        // Update main progress indicator for batch mode
         progressBar.value = 5;
         progressText.textContent = `⏳ معالجة دفعة: جاري إطلاق ${batchTotalImages} مهمة...`;
         
-        // Hide single image result elements
         imageResultArea.style.display = 'none';
         tableResultArea.style.display = 'none';
         
-        // Show batch result container
         resultSection.style.display = 'block';
         batchResultContainer.style.display = 'block';
     });
@@ -142,18 +135,15 @@ Document.addEventListener('DOMContentLoaded', () => {
         if (data.is_zip_batch) {
              batchCompletedImages++;
              
-             // Update main progress bar based on batch progress
              const batchProgress = Math.round((batchCompletedImages / batchTotalImages) * 100);
              progressBar.value = batchProgress;
              
              batchSummaryText.textContent = `جاري معالجة: ${batchCompletedImages} من ${batchTotalImages} صورة (${batchProgress}%)`;
 
-             // Add result to the batch list
              const listItem = document.createElement('li');
              const modeText = data.mode === 'extract' ? ' (تنظيف/استخراج)' : ' (ترجمة تلقائية)';
              const originalName = data.original_filename || 'unknown';
              
-             // Create a download link for the individual result
              const link = document.createElement('a');
              link.href = data.imageUrl;
              link.target = '_blank';
@@ -162,7 +152,6 @@ Document.addEventListener('DOMContentLoaded', () => {
              
              listItem.appendChild(link);
              
-             // Optionally add a link to the translation table if mode is extract
              if (data.mode === 'extract' && data.translations && data.translations.length > 0) {
                  const tableLink = document.createElement('span');
                  tableLink.textContent = ' [عرض الترجمات]';
@@ -175,17 +164,13 @@ Document.addEventListener('DOMContentLoaded', () => {
              batchImagesList.appendChild(listItem);
 
              if (batchCompletedImages === batchTotalImages) {
-                 // Final completion for the entire batch
                  progressText.textContent = '✨ اكتملت معالجة الدفعة بالكامل!';
                  console.log("Batch fully completed.");
-                 // Optionally offer a ZIP download of all results (requires backend support not implemented here)
              }
-             // Do not hide progress section, keep showing batch progress
              
-             // Update download link to point to the last processed image (as a fallback)
              downloadLink.href = data.imageUrl;
              
-             return; // Exit here for batch image completions
+             return; 
         }
         
         // --- Handle Single Image Completion (Original Logic) ---
@@ -199,7 +184,7 @@ Document.addEventListener('DOMContentLoaded', () => {
         resultSection.style.display = 'block';
         imageResultArea.style.display = 'none';
         tableResultArea.style.display = 'none';
-        batchResultContainer.style.display = 'none'; // Ensure batch container is hidden
+        batchResultContainer.style.display = 'none';
         translationsTableBody.innerHTML = '';
         resultImage.style.display = 'none';
         downloadLink.style.display = 'none';
@@ -216,15 +201,14 @@ Document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Prepare display based on mode
         let baseDownloadName = generateDownloadFilename(data.original_filename || selectedFile?.name, "");
         let suffix = '';
-        if (data.mode === 'extract' || data.mode === 'white_fill') { // Handle both modes
+        if (data.mode === 'extract' || data.mode === 'white_fill') {
             console.log("   Preparing 'extract' or 'white_fill' results.");
             imageResultTitle.textContent = data.mode === 'white_fill' ? "الصورة المنظفة (بالأبيض)" : "الصورة المنظفة/المستخلصة";
             suffix = data.mode === 'white_fill' ? '_cleaned_white.jpg' : '_cleaned.jpg';
             if (data.mode === 'extract' && data.translations) {
-                 populateTable(data.translations); // Populate table only if translations exist
+                 populateTable(data.translations);
                  tableResultArea.style.display = 'block';
             }
         } else if (data.mode === 'auto') {
@@ -257,9 +241,8 @@ Document.addEventListener('DOMContentLoaded', () => {
             progressText.textContent = '⚠️ اكتملت المعالجة ولكن فشل تحميل الصورة.';
         };
 
-        // Set the src AFTER attaching onload/onerror to trigger loading
         console.log("   Setting result image src:", data.imageUrl);
-        resultImage.src = data.imageUrl + '?t=' + Date.now(); // Cache bust
+        resultImage.src = data.imageUrl + '?t=' + Date.now();
     });
 
     socket.on('processing_error', (data) => {
@@ -273,7 +256,6 @@ Document.addEventListener('DOMContentLoaded', () => {
              batchImagesList.appendChild(listItem);
              batchCompletedImages++;
              
-             // Update batch progress for the skipped image
              const batchProgress = Math.round((batchCompletedImages / batchTotalImages) * 100);
              progressBar.value = batchProgress;
              batchSummaryText.textContent = `جاري معالجة: ${batchCompletedImages} من ${batchTotalImages} صورة (${batchProgress}%)`;
@@ -281,7 +263,7 @@ Document.addEventListener('DOMContentLoaded', () => {
              if (batchCompletedImages === batchTotalImages) {
                  progressText.textContent = '⚠️ اكتملت معالجة الدفعة مع بعض الأخطاء.';
              }
-             return; // Do not fully reset UI mid-batch
+             return;
         }
         
         // Handle single image error display
@@ -301,18 +283,15 @@ Document.addEventListener('DOMContentLoaded', () => {
         selectedFile = event.target.files[0];
         console.log("File selected:", selectedFile);
         if (selectedFile) {
-             // NEW: Allow ZIP files
              const allowedTypes = ['image/png', 'image/jpeg', 'image/webp', 'application/zip'];
-             const maxSizeMB = 50; // Match Flask config for zip
-             const maxSizeBytes = maxSizeMB * 1024 * 1024;
+             const maxZipSizeMB = 50; 
+             const maxZipSizeBytes = maxZipSizeMB * 1024 * 1024;
              
              const fileType = selectedFile.type === '' && selectedFile.name.toLowerCase().endsWith('.zip') ? 'application/zip' : selectedFile.type;
              
-             // Determine appropriate max size based on type
-             let currentMaxSize = maxSizeBytes; 
-             if (fileType !== 'application/zip') {
-                  // Allow much larger size for single images if server config supports it
-                  currentMaxSize = 9999999999999; 
+             let currentMaxSize = 9999999999999; 
+             if (fileType === 'application/zip') {
+                  currentMaxSize = maxZipSizeBytes; 
              }
              
              // Validate Type
@@ -335,9 +314,9 @@ Document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Allow clicking the label to trigger the hidden file input
+    // ❌ تم إزالة e.preventDefault(); هنا لحل مشكلة إغلاق النافذة المفاجئ 
     fileUploadLabel.addEventListener('click', (e) => {
-        e.preventDefault();
+        // e.preventDefault(); // تم إزالة هذا السطر
         imageUpload.click();
     });
 
@@ -353,7 +332,6 @@ Document.addEventListener('DOMContentLoaded', () => {
         
         console.log(`   Mode selected: ${currentMode}, File type: ${isZipFile ? 'ZIP' : 'Image'}, Endpoint: ${uploadEndpoint}`);
 
-        // --- Update UI for Uploading State ---
         uploadSection.style.display = 'none';
         progressSection.style.display = 'block';
         resultSection.style.display = 'none';
@@ -362,11 +340,9 @@ Document.addEventListener('DOMContentLoaded', () => {
         progressText.textContent = `⏫ بدء الرفع... (0%) ${isZipFile ? '[ملف مضغوط]' : ''}`;
         processButton.disabled = true;
 
-        // --- Create FormData ---
         const formData = new FormData();
         formData.append('file', selectedFile);
 
-        // --- Use XMLHttpRequest for Upload Progress ---
         const xhr = new XMLHttpRequest();
 
         // --- Progress Event Listener ---
@@ -397,13 +373,11 @@ Document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (xhr.status >= 200 && xhr.status < 300) {
-                // --- SUCCESS ---
                 console.log("   ✅ Upload successful via XHR:", resultJson);
                 progressBar.value = 100;
                 progressText.textContent = '⏳ تم الرفع بنجاح، في انتظار بدء المعالجة...';
 
                 if (isZipFile) {
-                    // --- ZIP FILE PROCESSING START ---
                     const { images_to_process } = resultJson;
                     if (!images_to_process || images_to_process.length === 0) {
                          console.error("   ❌ ZIP had no images to process:", resultJson);
@@ -413,7 +387,6 @@ Document.addEventListener('DOMContentLoaded', () => {
                          return;
                     }
                     
-                    // Emit SocketIO event for batch processing
                     socket.emit('start_batch_processing', {
                         images_to_process: images_to_process,
                         mode: currentMode
@@ -421,7 +394,6 @@ Document.addEventListener('DOMContentLoaded', () => {
                     console.log(`   ✅ Emitted 'start_batch_processing' for ${images_to_process.length} images.`);
                     
                 } else {
-                    // --- SINGLE IMAGE PROCESSING START ---
                     const { output_filename_base, saved_filename } = resultJson;
                     if (!output_filename_base || !saved_filename) {
                         console.error("   ❌ Incomplete data from server:", resultJson);
@@ -431,7 +403,6 @@ Document.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
 
-                    // Emit SocketIO event to start processing
                     socket.emit('start_processing', {
                         output_filename_base: output_filename_base,
                         saved_filename: saved_filename,
@@ -441,7 +412,6 @@ Document.addEventListener('DOMContentLoaded', () => {
                 }
 
             } else {
-                // --- ERROR from Server (e.g., 400, 500) ---
                 console.error(`   ❌ Server returned error status ${xhr.status}:`, resultJson);
                 errorText.textContent = `😭 خطأ الرفع: ${resultJson.error || ('خطأ من الخادم ' + xhr.status)}`;
                 errorText.style.display = 'block';
@@ -485,7 +455,7 @@ Document.addEventListener('DOMContentLoaded', () => {
 
     // --- Helper Function to Reset UI after Upload/Processing Error ---
     function resetUiAfterError(allowRetry = true) {
-         isBatchProcessing = false; // Ensure batch flag is reset
+         isBatchProcessing = false;
          batchTotalImages = 0;
          batchCompletedImages = 0;
          progressSection.style.display = 'none';
@@ -515,17 +485,14 @@ Document.addEventListener('DOMContentLoaded', () => {
             const cellText = row.insertCell();
             cellId.textContent = (item.id !== undefined && item.id !== null) ? item.id : '-';
             const safeText = item.translation ? String(item.translation) : '';
-            // Basic sanitization + newline handling
             cellText.innerHTML = safeText.replace(/</g, "&lt;")
                                         .replace(/>/g, "&gt;")
                                         .replace(/\n/g, '<br>');
         });
     }
     
-    // --- NEW: Function to display translations in a modal (simplified example) ---
+    // --- Function to display translations in a modal (simplified example using alert) ---
     function showTranslationsModal(filename, translations) {
-        // In a real application, you would use a modal library or create a complex modal DOM here.
-        // For simplicity, we use an alert for demonstration.
         let text = `الترجمات المستخرجة لملف: ${filename}\n\n`;
         translations.forEach(item => {
              text += `[${item.id || '-'}] ${item.translation}\n---\n`;
@@ -534,10 +501,11 @@ Document.addEventListener('DOMContentLoaded', () => {
         console.log(`Translations for ${filename} displayed.`);
     }
 
+
     function generateDownloadFilename(originalName, suffix) {
         const defaultName = "processed_image";
         let baseName = defaultName;
-        let originalExtension = '.jpg'; // Default extension
+        let originalExtension = '.jpg'; 
 
         if (originalName && typeof originalName === 'string') {
             const lastDotIndex = originalName.lastIndexOf('.');
@@ -548,12 +516,7 @@ Document.addEventListener('DOMContentLoaded', () => {
                 baseName = originalName;
             }
         }
-        // Use the original extension if it's not a standard image format after suffixing
-        const finalExtension = originalExtension.match(/(\.png|\.jpg|\.jpeg|\.webp)$/) ? originalExtension : '.jpg';
         
-        // Note: The backend dictates the saved extension (currently .jpg), 
-        // but we'll try to use a standardized extension for the download link.
-        // Since the backend saves as JPG, we should stick to .jpg for simplicity here.
         return `${baseName}${suffix || ''}.jpg`;
     }
 
@@ -569,9 +532,9 @@ Document.addEventListener('DOMContentLoaded', () => {
         resultSection.style.display = 'none';
         imageResultArea.style.display = 'none';
         tableResultArea.style.display = 'none';
-        batchResultContainer.style.display = 'none'; // NEW: Hide batch results
-        batchImagesList.innerHTML = ''; // NEW: Clear batch list
-        batchSummaryText.textContent = ''; // NEW: Clear batch summary
+        batchResultContainer.style.display = 'none';
+        batchImagesList.innerHTML = '';
+        batchSummaryText.textContent = '';
         
         resultImage.src = "#";
         resultImage.style.display = 'none';
@@ -587,7 +550,7 @@ Document.addEventListener('DOMContentLoaded', () => {
 
     function resetToUploadState() {
         console.log("Resetting UI to initial upload state.");
-        isBatchProcessing = false; // Reset batch flag
+        isBatchProcessing = false;
         batchTotalImages = 0;
         batchCompletedImages = 0;
         resetResultArea();
